@@ -460,7 +460,8 @@ URL to `AVPlayer` cannot trim and gets gapless playback on originals only.
 track.sampleRate`). The server starts the encode at exactly that sample, and
 the headers describe the stream from there. Without `s` the stream starts at 0.
 
-At most one transcode per CPU core runs at once per server; beyond that the
+At most four transcodes per CPU core run at once per server (one the client
+is not reading uses no CPU); beyond that the
 server answers `503 transcodeUnavailable`. Stopping reading ends the encode.
 
 ### 9.3 Artwork
@@ -596,7 +597,8 @@ GET /v2/changes?since=<seq>&wait=<0…60>
 
 Every change to a user's data advances that user's `seq`. `changed` lists
 which kinds changed after `since`: `tracks`, `playlists`, `prefs`,
-`organizer`, `history`, `library` (state, quota or scan progress). When
+`organizer`, `history`, `userdata`, `library` (state, quota or scan
+progress). When
 nothing has changed the server holds the request up to `wait` seconds
 (default 0) and answers as soon as something does, or with an empty
 `changed` at the deadline. Clients long-poll this while in the foreground and
@@ -767,6 +769,55 @@ Prefs = {
 `"mac"`), each ≤ 64 KiB. A `PATCH` replaces the keys it names; a `null`
 under `clients` removes that key. Never store credentials here.
 
+### User data
+
+Customisation that is too big for preferences, such as artist profiles and
+their pictures, follows the user as named files. The server stores the bytes
+and never reads them.
+
+```
+GET    /v2/userdata          → { "items": [{ "name": String, "size": Int, "etag": String }] }
+GET    /v2/userdata/{name}   → the bytes, with ETag; honours If-None-Match and Range
+PUT    /v2/userdata/{name}   ← the bytes (≤ 8 MiB) → 204, with ETag
+DELETE /v2/userdata/{name}   → 204
+```
+
+`name` is ≤ 200 bytes of `/`-separated segments. A segment uses
+`A–Z a–z 0–9 . _ -` and does not start with a dot. `etag` is derived from
+the bytes, so equal bytes have equal ETags on every server, and a `PUT` of
+the bytes already stored changes nothing. Last write wins. Any other change
+reports `userdata` on `/v2/changes`.
+
+A client syncs by listing and comparing ETags. It remembers the ETag each
+item had when it last matched the server, which tells the cases apart:
+
+| Local | Server | Meaning |
+|-------|--------|---------|
+| changed since its remembered ETag | same as remembered | upload |
+| unchanged | different ETag | download |
+| never synced | absent | upload |
+| unchanged | absent | deleted elsewhere: remove locally |
+| deleted locally | same as remembered | `DELETE` |
+| changed | different ETag | both changed: the server copy wins |
+
+Names every client agrees on:
+
+- `artists/<id>.json`: one artist's profile. `<id>` is the first 32 hex
+  characters of SHA-256 over the UTF-8 artist key (the Mac's
+  `ArtistResolver.key(for:)`).
+
+  ```
+  ArtistProfile = { "canonicalKey": String, "displayName": String?,
+                    "bannerImage": base64 JPEG or PNG?, "profileImage": base64 JPEG or PNG? }
+  ```
+
+  This is the Mac's `ArtistOverride` JSON. Clients scale pictures so the
+  file stays under the limit. A profile with nothing set is deleted, not
+  stored empty.
+
+Everything else is private to one kind of client and lives under that
+client's prefix (`mac/…`, `linux/…`). Never store credentials here.
+
 ---
 
 ## 15. Listening history and stats
@@ -848,6 +899,7 @@ backups) is done with the `flactastic-server` CLI on the server.
 | History page | 5000, default 1000 |
 | Organizer profiles | 100 |
 | `clients` preference keys | 64 keys of ≤ 64 bytes |
+| User data | 8 MiB per item, 512 MiB and 20 000 items per user, name ≤ 200 bytes |
 | Track page | 5000 |
 | Batch edit | 1000 tracks |
 | Path component / depth / whole path | 255 bytes / 32 / 3072 bytes |
@@ -855,7 +907,7 @@ backups) is done with the `flactastic-server` CLI on the server.
 | Sign-in back-off | 5 free, then 1 s doubling to 15 min |
 | Long-poll wait | 60 s |
 | Idle connection | 120 s |
-| Concurrent transcodes | one per CPU core |
+| Concurrent transcodes | four per CPU core |
 | Staged upload lifetime | 7 days |
 | Trash | 30 days |
 

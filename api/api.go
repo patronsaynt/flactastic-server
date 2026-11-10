@@ -37,7 +37,7 @@ type Server struct {
 
 func New(s *store.Store, libs *library.Manager, version, name, ffmpeg string) *Server {
 	return &Server{Store: s, Libs: libs, Version: version, Name: name, FFmpeg: ffmpeg, started: time.Now(),
-		transcodes: make(chan struct{}, runtime.NumCPU()), failures: limiter{m: map[string]*failure{}}}
+		transcodes: make(chan struct{}, 4*runtime.NumCPU()), failures: limiter{m: map[string]*failure{}}}
 }
 
 // session is an authenticated request's identity. Everything a handler can
@@ -90,6 +90,10 @@ func (srv *Server) Handler() http.Handler {
 	auth("DELETE /v2/playlists/{id}", srv.deletePlaylist)
 	auth("GET /v2/prefs", srv.prefs)
 	auth("PATCH /v2/prefs", srv.patchPrefs)
+	auth("GET /v2/userdata", srv.userItems)
+	auth("GET /v2/userdata/{name...}", srv.userItem)
+	auth("PUT /v2/userdata/{name...}", srv.putUserItem)
+	auth("DELETE /v2/userdata/{name...}", srv.deleteUserItem)
 	auth("POST /v2/history", srv.addHistory)
 	auth("GET /v2/history", srv.history)
 	auth("GET /v2/stats", srv.stats)
@@ -280,12 +284,14 @@ func (srv *Server) authed(w http.ResponseWriter, r *http.Request, h handler) {
 		fail(w, errAuth)
 		return
 	}
-	if d := srv.failures.wait("ip:" + clientIP(r)); d > 0 {
-		retry(w, d)
-		return
-	}
+	// A valid token is never throttled: it can't be guessed, and a stale device
+	// on the same network must not lock the others out.
 	device, user, err := srv.Store.DeviceForToken(token)
 	if err != nil {
+		if d := srv.failures.wait("ip:" + clientIP(r)); d > 0 {
+			retry(w, d)
+			return
+		}
 		srv.failures.fail("ip:" + clientIP(r))
 		fail(w, errAuth)
 		return

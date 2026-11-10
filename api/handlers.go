@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -486,6 +488,53 @@ func (srv *Server) patchPrefs(w http.ResponseWriter, r *http.Request, s session)
 		return errBadRequest
 	}
 	return ok(w, p)
+}
+
+// User data (protocol §14)
+
+func (srv *Server) userItems(w http.ResponseWriter, r *http.Request, s session) error {
+	items, err := s.lib.UserItems()
+	if err != nil {
+		return err
+	}
+	return ok(w, map[string]any{"items": items})
+}
+
+func (srv *Server) userItem(w http.ResponseWriter, r *http.Request, s session) error {
+	data, etag, err := s.lib.UserItem(r.PathValue("name"))
+	if err != nil {
+		return err
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Cache-Control", "private, no-cache")
+	h.Set("ETag", `"`+etag+`"`)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
+	return nil
+}
+
+func (srv *Server) putUserItem(w http.ResponseWriter, r *http.Request, s session) error {
+	name := r.PathValue("name")
+	if !library.ValidUserName(name) {
+		return errBadRequest
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, library.MaxUserItem))
+	if err != nil {
+		return err
+	}
+	etag, err := s.lib.PutUserItem(name, data)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("ETag", `"`+etag+`"`)
+	return noContent(w)
+}
+
+func (srv *Server) deleteUserItem(w http.ResponseWriter, r *http.Request, s session) error {
+	if err := s.lib.DeleteUserItem(r.PathValue("name")); err != nil {
+		return err
+	}
+	return noContent(w)
 }
 
 // History and stats (protocol §15)

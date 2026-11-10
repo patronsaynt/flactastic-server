@@ -558,7 +558,7 @@ paths:
                   seq: { $ref: '#/components/schemas/Seq' }
                   changed:
                     type: array
-                    items: { type: string, enum: [tracks, playlists, prefs, organizer, history, library] }
+                    items: { type: string, enum: [tracks, playlists, prefs, organizer, history, userdata, library] }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -757,6 +757,89 @@ paths:
       summary: Delete a playlist
       responses:
         '204': { description: 'Deleted.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/userdata:
+    get:
+      tags: [prefs]
+      operationId: listUserData
+      summary: The user's stored files, by name
+      responses:
+        '200':
+          description: Every item with its size and ETag.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/UserItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/userdata/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: '≤ 200 bytes of `/`-separated segments (sent unencoded); each uses `A–Z a–z 0–9 . _ -` and does not start with a dot.'
+        schema: { type: string, maxLength: 200 }
+    get:
+      tags: [prefs]
+      operationId: getUserData
+      summary: One stored file
+      description: Honours `If-None-Match` and `Range`.
+      responses:
+        '200':
+          description: The bytes.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '304': { description: Unchanged. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    put:
+      tags: [prefs]
+      operationId: putUserData
+      summary: Create or replace a stored file
+      description: Last write wins. Storing the bytes already there changes nothing.
+      requestBody:
+        required: true
+        description: '≤ 8 MiB.'
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204':
+          description: Stored.
+          headers:
+            ETag: { schema: { type: string } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    delete:
+      tags: [prefs]
+      operationId: deleteUserData
+      summary: Remove a stored file
+      responses:
+        '204': { description: Removed. }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -1311,6 +1394,13 @@ components:
         customArtwork: { type: string, contentEncoding: base64, description: '≤ 5 MiB.' }
         description: { type: string, maxLength: 200 }
 
+    UserItem:
+      type: object
+      required: [name, size, etag]
+      properties:
+        name: { type: string }
+        size: { type: integer }
+        etag: { type: string, description: Derived from the bytes. }
     Prefs:
       type: object
       properties:

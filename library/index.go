@@ -25,7 +25,8 @@ CREATE TABLE contexts(kind TEXT NOT NULL, target TEXT NOT NULL, date TEXT NOT NU
 	PRIMARY KEY(kind, target));
 CREATE TABLE docs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE uploads(id TEXT PRIMARY KEY, ext TEXT NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL, track TEXT,
-	created INTEGER NOT NULL)`}
+	created INTEGER NOT NULL)`, `
+CREATE TABLE userdata(name TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL)`}
 
 // Track is a track as clients see it (protocol §7).
 type Track struct {
@@ -70,9 +71,10 @@ const (
 	KindOrganizer = "organizer"
 	KindHistory   = "history"
 	KindLibrary   = "library"
+	KindUserData  = "userdata"
 )
 
-var Kinds = []string{KindTracks, KindPlaylists, KindPrefs, KindOrganizer, KindHistory, KindLibrary}
+var Kinds = []string{KindTracks, KindPlaylists, KindPrefs, KindOrganizer, KindHistory, KindLibrary, KindUserData}
 
 // bump advances the change sequence for kinds inside tx and returns it.
 func bump(tx *sql.Tx, kinds ...string) (seq int64, err error) {

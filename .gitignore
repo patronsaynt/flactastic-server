@@ -5,3 +5,6 @@
 /tools/vectors/fixtures/
 /tools/vectors/Sources/Mac/
 /tools/vectors/Sources/CTagLibHelper/
+
+# Handoff prompts for other clients stay local.
+/prompts/

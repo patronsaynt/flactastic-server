@@ -285,7 +285,12 @@ verify() {
     [[ -n $want ]] || die "$1 isn't listed in SHA256SUMS"
     [[ $(sha256sum <"$TMP/$1") == "$want  -" ]] || die "$1 doesn't match SHA256SUMS"
 }
-tag_of() { curl -fsSL --proto '=https' "$1" 2>/dev/null | grep -m1 -o '"tag_name": *"[^"]*"' | cut -d'"' -f4; }
+# Fetched whole before searching: grep leaving early would fail curl, and with it the pipeline.
+tag_of() {
+    local json
+    json=$(curl -fsSL --proto '=https' "$1" 2>/dev/null) || return
+    grep -m1 -o '"tag_name": *"[^"]*"' <<<"$json" | cut -d'"' -f4
+}
 download() { for f in SHA256SUMS "${assets[@]}"; do fetch "$f" || return; done; }
 
 here=''

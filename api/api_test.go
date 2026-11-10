@@ -172,6 +172,9 @@ func TestAuth(t *testing.T) {
 		e.login("alice", "wrong-password", 401)
 	}
 	e.login("alice", "wrong-password", 429)
+	// A backed-off IP still serves valid tokens; only unknown ones are refused.
+	e.get(e.bob, "/v2/me", 200)
+	e.get("stale-token", "/v2/me", 429)
 	e.server.failures.clear("ip:127.0.0.1")
 
 	// Changing a password revokes the user's other devices.
@@ -409,6 +412,55 @@ func TestUserData(t *testing.T) {
 }
 
 // TestIsolation proves nothing one user can name reaches another's data.
+func TestUserItems(t *testing.T) {
+	e := setup(t)
+	put := func(token, name, body string, status int) string {
+		t.Helper()
+		res := e.do(token, "PUT", "/v2/userdata/"+name, strings.NewReader(body), nil)
+		res.Body.Close()
+		if res.StatusCode != status {
+			t.Fatalf("PUT %s: %d, want %d", name, res.StatusCode, status)
+		}
+		return res.Header.Get("ETag")
+	}
+	etag := put(e.alice, "artists/abc.json", `{"displayName":"A"}`, 204)
+	seq := e.get(e.alice, "/v2/changes?since=0", 200)["seq"].(float64)
+	// The same bytes again are not a change.
+	put(e.alice, "artists/abc.json", `{"displayName":"A"}`, 204)
+	if again := e.get(e.alice, "/v2/changes?since=0", 200)["seq"].(float64); again != seq {
+		t.Fatal("an identical put advanced the sequence")
+	}
+	if kinds := fmt.Sprint(e.get(e.alice, "/v2/changes?since=0", 200)["changed"]); !strings.Contains(kinds, "userdata") {
+		t.Fatal(kinds)
+	}
+	items := e.get(e.alice, "/v2/userdata", 200)["items"].([]any)
+	if len(items) != 1 || `"`+items[0].(map[string]any)["etag"].(string)+`"` != etag {
+		t.Fatal(items)
+	}
+	res := e.do(e.alice, "GET", "/v2/userdata/artists/abc.json", nil, map[string]string{"If-None-Match": etag})
+	res.Body.Close()
+	if res.StatusCode != 304 {
+		t.Fatal(res.StatusCode)
+	}
+	res = e.do(e.alice, "GET", "/v2/userdata/artists/abc.json", nil, nil)
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if string(body) != `{"displayName":"A"}` {
+		t.Fatal(string(body))
+	}
+	// One user's data is invisible to another.
+	e.get(e.bob, "/v2/userdata/artists/abc.json", 404)
+	if n := len(e.get(e.bob, "/v2/userdata", 200)["items"].([]any)); n != 0 {
+		t.Fatal(n)
+	}
+	put(e.alice, ".hidden", "x", 400)
+	put(e.alice, "a/.x", "x", 400)
+	put(e.alice, "a%20b", "x", 400)
+	put(e.alice, "big", strings.Repeat("x", 8<<20+1), 413)
+	e.json(e.alice, "DELETE", "/v2/userdata/artists/abc.json", nil, 204)
+	e.json(e.alice, "DELETE", "/v2/userdata/artists/abc.json", nil, 404)
+}
+
 func TestIsolation(t *testing.T) {
 	e := setup(t)
 	aliceTrack := e.tracks(e.alice)["hires.flac"]
