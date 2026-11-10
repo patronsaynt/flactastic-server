@@ -80,5 +80,8 @@ jobs:
           cp install.sh dist/flactastic-server.service dist/flactastic-server.avahi.service release/
           cd release
           sha256sum -- * > SHA256SUMS
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "$TAG" --prerelease --generate-notes -- *
+          # A release made by hand for this tag gets the files added to it.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "$TAG" --prerelease --generate-notes
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber -- *
