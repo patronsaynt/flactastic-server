@@ -83,12 +83,15 @@ func setup(t *testing.T) *env {
 }
 
 func (e *env) waitReady(token string) {
-	for i := 0; i < 200; i++ {
-		lib := e.get(token, "/v2/library", 200)
-		if lib["state"] == "ready" && lib["pendingHashes"].(float64) == 0 && lib["trackCount"].(float64) > 0 {
+	// Until the library is open the server answers 503, so any status is fine here.
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		res := e.do(token, "GET", "/v2/library", nil, nil)
+		var lib map[string]any
+		json.NewDecoder(res.Body).Decode(&lib)
+		res.Body.Close()
+		if res.StatusCode == 200 && lib["state"] == "ready" && lib["pendingHashes"].(float64) == 0 && lib["trackCount"].(float64) > 0 {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 	e.t.Fatal("library never became ready")
 }
@@ -471,9 +474,17 @@ func TestSymlinkEscape(t *testing.T) {
 	}
 	os.Symlink(e.bRoot, filepath.Join(e.aRoot, "linked"))
 	e.server.Libs.Get(e.server.libID("alice")).Scan()
-	time.Sleep(3 * time.Second)
+	// The rescan drops the replaced track; wait for that rather than guess its timing.
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(100 * time.Millisecond) {
+		if _, still := e.tracks(e.alice)["hires.flac"]; !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("still indexing a symlink as hires.flac")
+		}
+	}
 	for p := range e.tracks(e.alice) {
-		if strings.HasPrefix(p, "linked/") || p == "hires.flac" {
+		if strings.HasPrefix(p, "linked/") {
 			t.Fatalf("indexed %s", p)
 		}
 	}

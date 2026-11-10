@@ -175,6 +175,17 @@ func (l *Library) scan(watch int) {
 		if seen[rel] || underAny(rel, unreadable) {
 			continue
 		}
+		// The walk ran unlocked: the server may have moved this track
+		// meanwhile, or put a file back at this path.
+		var now string
+		l.db.QueryRow("SELECT path FROM tracks WHERE id = ?", t.id).Scan(&now)
+		if now != rel {
+			continue
+		}
+		if f, err := r.Open(rel, unix.O_RDONLY, 0); err == nil { // a real file, not a symlink
+			f.Close()
+			continue
+		}
 		l.forget(t.id, rel)
 	}
 	l.saveSidecar(r)
