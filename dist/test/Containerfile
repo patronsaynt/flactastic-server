@@ -1,0 +1,8 @@
+# Debian 13 booting systemd, for testing install.sh with the stub server:
+#   podman build -t flactastic-test dist/test
+#   podman run -d --name ft --systemd=always -v .:/src:ro,z flactastic-test
+FROM docker.io/library/debian:trixie
+RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssl ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

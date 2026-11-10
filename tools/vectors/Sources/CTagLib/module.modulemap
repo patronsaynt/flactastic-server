@@ -1,0 +1,5 @@
+module CTagLib [system] {
+    header "tag_c.h"
+    link "tag_c"
+    export *
+}

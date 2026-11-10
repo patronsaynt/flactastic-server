@@ -1,0 +1,43 @@
+[Unit]
+Description=FLACtastic Server
+Documentation=https://github.com/patronsaynt/flactastic-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=flactastic
+Group=flactastic
+ExecStart=/usr/local/bin/flactastic-server serve --data /var/lib/flactastic-server --listen :4410
+Restart=on-failure
+UMask=0027
+LimitNOFILE=65536
+
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/flactastic-server
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+ProtectProc=invisible
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

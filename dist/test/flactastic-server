@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Test double for flactastic-server: follows the CLI contract, serves /v2/server with openssl s_server.
+set -euo pipefail
+data=/var/lib/flactastic-server
+args=()
+while (($#)); do
+    case $1 in
+        --data) data=$2; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+
+state() {
+    [[ -f $data/id ]] || cat /proc/sys/kernel/random/uuid >"$data/id"
+    [[ -f $data/cert.pem ]] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+        -keyout "$data/key.pem" -out "$data/cert.pem" -days 3650 -subj /CN=flactastic 2>/dev/null
+    mkdir -p "$data/www/v2"
+    printf '{"id":"%s","version":"beta-0"}' "$(<"$data/id")" >"$data/www/v2/server"
+    touch "$data/users"
+    ((EUID)) || chown -R flactastic:flactastic "$data"
+}
+
+fingerprint() {
+    local hex bits b32=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567 out='' i
+    hex=$(openssl x509 -in "$data/cert.pem" -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum)
+    bits=$((16#${hex:0:15}))
+    for i in {11..0}; do out+=${b32:$(((bits >> (5 * i)) & 31)):1}; done
+    echo "${out:0:4}-${out:4:4}-${out:8:4}"
+}
+
+case "${1:-} ${2:-}" in
+    "version "*) echo beta-0 ;;
+    "serve "*)
+        state
+        cd "$data/www"
+        exec openssl s_server -quiet -accept 4410 -cert ../cert.pem -key ../key.pem -WWW ;;
+    "info "*)
+        state
+        printf 'name: %s\nid: %s\nversion: beta-0\nport: 4410\nfingerprint: %s\n' "$(hostname)" "$(<"$data/id")" "$(fingerprint)"
+        for ip in $(hostname -I); do echo "address: https://$ip:4410"; done ;;
+    "user list") state; cut -f1 "$data/users" ;;
+    "user add")
+        state
+        name=$3 root='' && shift 3
+        while (($#)); do case $1 in --root) root=$2; shift 2 ;; *) shift ;; esac; done
+        IFS= read -r pw
+        [[ -n $pw && -d $root ]] || { echo "bad password or root" >&2; exit 1; }
+        printf '%s\t%s\n' "$name" "$root" >>"$data/users"
+        mkdir -p "$root/.flactastic"
+        [[ -f $root/.flactastic/library.json ]] || echo '{}' >"$root/.flactastic/library.json"
+        if ((EUID == 0)); then
+            chown -R flactastic:flactastic "$root/.flactastic"
+            mkdir -p /etc/systemd/system/flactastic-server.service.d
+            printf '[Service]\nReadWritePaths=%s\n' "$(cut -f2 "$data/users" | sed 's/.*/"&"/' | paste -sd' ')" \
+                >/etc/systemd/system/flactastic-server.service.d/libraries.conf
+            systemctl daemon-reload
+            systemctl try-restart flactastic-server
+        fi ;;
+    *) echo "stub: unsupported: $*" >&2; exit 2 ;;
+esac

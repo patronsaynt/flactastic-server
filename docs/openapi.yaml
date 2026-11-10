@@ -1,0 +1,1411 @@
+openapi: 3.1.0
+info:
+  title: FLACtastic Server Protocol
+  version: '2.0'
+  description: >-
+    Machine-readable form of `server-protocol-v2.md`; where they disagree, that
+    document wins. Trust is a pinned SHA-256 fingerprint of the server
+    certificate's SubjectPublicKeyInfo (§3), not a CA chain or hostname.
+    Unknown paths answer `404 notFound`.
+servers:
+  - url: https://{host}:4410
+    variables:
+      host:
+        default: localhost
+        description: Server address (LAN, VPN or forwarded); discovered via `_flactastic-srv._tcp`.
+security:
+  - bearer: []
+
+paths:
+  /v2/server:
+    get:
+      tags: [library]
+      operationId: getServer
+      summary: Server identity and protocol version
+      security: []
+      responses:
+        '200':
+          description: Server info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServerInfo' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/auth/login:
+    post:
+      tags: [accounts]
+      operationId: login
+      summary: Sign in and register this device
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/auth/logout:
+    post:
+      tags: [accounts]
+      operationId: logout
+      summary: Revoke the calling token
+      responses:
+        '204': { description: 'Revoked.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/me:
+    get:
+      tags: [accounts]
+      operationId: getMe
+      summary: The calling user and device
+      responses:
+        '200':
+          description: User and device.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, device]
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  device: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/me/password:
+    put:
+      tags: [accounts]
+      operationId: changePassword
+      summary: Change password; revokes every other device of this user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current, new]
+              properties:
+                current: { type: string }
+                new: { type: string, description: '8–1024 bytes of UTF-8.' }
+      responses:
+        '204': { description: 'Changed.' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/UnauthorizedOrCredentials' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/devices:
+    get:
+      tags: [accounts]
+      operationId: listDevices
+      summary: This user's devices
+      responses:
+        '200':
+          description: Devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices: { type: array, items: { $ref: '#/components/schemas/Device' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/devices/{id}:
+    delete:
+      tags: [accounts]
+      operationId: revokeDevice
+      summary: Revoke one of this user's devices
+      parameters: [{ $ref: '#/components/parameters/UUIDPath' }]
+      responses:
+        '204': { description: 'Revoked.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/library:
+    get:
+      tags: [library]
+      operationId: getLibrary
+      summary: Library state, change sequence and storage
+      responses:
+        '200':
+          description: Library summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LibraryInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/tracks:
+    get:
+      tags: [library]
+      operationId: listTracks
+      summary: Tracks created, changed or deleted after a sequence
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        '200':
+          description: One page, in sequence order. Repeat with `seq` while `more`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tracks, deleted, seq, more]
+                properties:
+                  tracks: { type: array, items: { $ref: '#/components/schemas/Track' } }
+                  deleted: { type: array, items: { $ref: '#/components/schemas/UUID' } }
+                  seq: { $ref: '#/components/schemas/Seq' }
+                  more: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    patch:
+      tags: [library]
+      operationId: editTracks
+      summary: Apply one tag edit to several tracks (an album edit)
+      requestBody:
+        required: true
+        description: '≤ 16 MiB.'
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, edit]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { $ref: '#/components/schemas/UUID' }
+                edit: { $ref: '#/components/schemas/Edit' }
+      responses:
+        '200':
+          description: The edited tracks, after refiling.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tracks]
+                properties:
+                  tracks: { type: array, items: { $ref: '#/components/schemas/Track' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/tracks/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUIDPath' }]
+    get:
+      tags: [library]
+      operationId: getTrack
+      summary: One track, with its cue sheet and lyrics
+      responses:
+        '200':
+          description: The track.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    patch:
+      tags: [library]
+      operationId: editTrack
+      summary: Edit one track's tags
+      requestBody:
+        required: true
+        description: '≤ 16 MiB.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Edit' }
+      responses:
+        '200':
+          description: The edited track, after refiling.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [track]
+                properties:
+                  track: { $ref: '#/components/schemas/Track' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    delete:
+      tags: [library]
+      operationId: deleteTrack
+      summary: Move a track to the library trash (deleted after 30 days)
+      responses:
+        '204': { description: 'Trashed.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/tracks/{id}/file:
+    get:
+      tags: [files]
+      operationId: getTrackFile
+      summary: Original bytes, with Range and conditional requests
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+        - { name: Range, in: header, description: 'A single byte range.', schema: { type: string } }
+        - { name: If-Range, in: header, schema: { type: string } }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+        - { name: If-Modified-Since, in: header, schema: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/Audio' }
+        '206': { $ref: '#/components/responses/AudioPartial' }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416': { description: 'Range not satisfiable.' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/tracks/{id}/stream:
+    get:
+      tags: [files]
+      operationId: streamTrack
+      summary: Original bytes, or an AAC transcode with gapless trim headers
+      description: '`quality=original` behaves exactly as `/file` (including 206, 304 and 416).'
+      parameters:
+        - $ref: '#/components/parameters/UUIDPath'
+        - name: quality
+          in: query
+          schema: { type: string, enum: [original, high, normal, low], default: original }
+          description: 'high 256, normal 160, low 96 kbit/s AAC-LC.'
+        - name: s
+          in: query
+          description: Start position in source sample frames (seconds × track.sampleRate). Transcodes only.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - { name: Range, in: header, description: 'Original quality only.', schema: { type: string } }
+      responses:
+        '200':
+          description: >-
+            Original bytes (see `/file`), or a transcode: chunked ADTS AAC,
+            `Accept-Ranges: none`, `Cache-Control: no-store`, with the
+            FLACtastic-* headers.
+          headers:
+            ETag: { $ref: '#/components/headers/FileETag' }
+            FLACtastic-Sample-Rate:
+              description: Transcode only. Output sample rate.
+              schema: { type: integer }
+            FLACtastic-Priming:
+              description: Transcode only. Samples of encoder delay to discard from the start of the decoded output.
+              schema: { type: integer }
+            FLACtastic-Frames:
+              description: Transcode only. Samples of real audio to keep after the priming; discard everything after. Absent when the length is unknown; then keep everything after the priming.
+              schema: { type: integer }
+          content:
+            audio/aac: { schema: { $ref: '#/components/schemas/Binary' } }
+            audio/flac: { schema: { $ref: '#/components/schemas/Binary' } }
+            audio/mpeg: { schema: { $ref: '#/components/schemas/Binary' } }
+            audio/wav: { schema: { $ref: '#/components/schemas/Binary' } }
+            audio/aiff: { schema: { $ref: '#/components/schemas/Binary' } }
+            audio/mp4: { schema: { $ref: '#/components/schemas/Binary' } }
+        '206': { $ref: '#/components/responses/AudioPartial' }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416': { description: 'Range not satisfiable (original quality).' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/art/{artworkID}:
+    get:
+      tags: [files]
+      operationId: getArtwork
+      summary: Embedded picture or a cached JPEG thumbnail
+      parameters:
+        - name: artworkID
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+        - name: size
+          in: query
+          description: Long-edge pixel limit (never upscaled), or the picture as stored.
+          schema: { type: string, enum: ['300', '1000', original], default: original }
+      responses:
+        '200':
+          description: Immutable image.
+          headers:
+            ETag:
+              description: '`"<artworkID>-<size>"`.'
+              schema: { type: string }
+            Cache-Control:
+              description: '`private, max-age=31536000, immutable`.'
+              schema: { type: string }
+          content:
+            image/jpeg: { schema: { $ref: '#/components/schemas/Binary' } }
+            image/png: { schema: { $ref: '#/components/schemas/Binary' } }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/albums:
+    get:
+      tags: [library]
+      operationId: listAlbums
+      summary: Albums grouped by the Mac's LibraryStore rule (§8.4)
+      responses:
+        '200':
+          description: Albums.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [albums]
+                properties:
+                  albums: { type: array, items: { $ref: '#/components/schemas/Album' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/search:
+    get:
+      tags: [library]
+      operationId: search
+      summary: Case- and diacritic-insensitive substring search
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Matching tracks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tracks]
+                properties:
+                  tracks: { type: array, items: { $ref: '#/components/schemas/Track' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/uploads:
+    post:
+      tags: [uploads]
+      operationId: createUpload
+      summary: Open (or find again) a resumable upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadRequest' }
+      responses:
+        '201':
+          description: The upload and the server's current offset.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Upload' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/uploads/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUIDPath' }]
+    head:
+      tags: [uploads]
+      operationId: getUploadOffset
+      summary: The server's current offset
+      responses:
+        '204':
+          description: Current offset.
+          headers:
+            Upload-Offset: { $ref: '#/components/headers/UploadOffset' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    patch:
+      tags: [uploads]
+      operationId: appendUpload
+      summary: Send bytes at the server's offset
+      parameters:
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: { type: integer, minimum: 0 }
+      requestBody:
+        required: true
+        content:
+          application/offset+octet-stream:
+            schema: { $ref: '#/components/schemas/Binary' }
+      responses:
+        '200':
+          description: Last byte received; the file is verified, placed and installed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [track]
+                properties:
+                  track: { $ref: '#/components/schemas/Track' }
+        '204':
+          description: Bytes stored; upload still incomplete.
+          headers:
+            Upload-Offset: { $ref: '#/components/headers/UploadOffset' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`offsetMismatch`.'
+          headers:
+            Upload-Offset: { $ref: '#/components/headers/UploadOffset' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422':
+          description: '`hashMismatch`; the staged file is deleted.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    delete:
+      tags: [uploads]
+      operationId: cancelUpload
+      summary: Abandon an upload
+      responses:
+        '204': { description: 'Abandoned.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/changes:
+    get:
+      tags: [sync]
+      operationId: getChanges
+      summary: Long-poll for kinds of data changed after a sequence
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - name: wait
+          in: query
+          description: Seconds to hold the request while nothing has changed.
+          schema: { type: integer, minimum: 0, maximum: 60, default: 0 }
+      responses:
+        '200':
+          description: Changed kinds; empty at the deadline.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [seq, changed]
+                properties:
+                  seq: { $ref: '#/components/schemas/Seq' }
+                  changed:
+                    type: array
+                    items: { type: string, enum: [tracks, playlists, prefs, organizer, history, library] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/manifest:
+    post:
+      tags: [sync]
+      operationId: getManifest
+      summary: Build a manifest for offline copies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                selection: { $ref: '#/components/schemas/Selection' }
+                filter: { $ref: '#/components/schemas/SyncFilter' }
+      responses:
+        '200':
+          description: The manifest (hashed tracks only).
+          headers:
+            FLACtastic-Pending:
+              description: Tracks in the selection not yet hashed, left out of the manifest.
+              schema: { type: integer, minimum: 0 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LibraryManifest' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/organizer:
+    get:
+      tags: [organizer]
+      operationId: getOrganizer
+      summary: This user's Organizer profiles
+      responses:
+        '200':
+          description: Profiles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Organizer' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    put:
+      tags: [organizer]
+      operationId: putOrganizer
+      summary: Replace this user's Organizer profiles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Organizer' }
+      responses:
+        '204': { description: 'Stored.' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/organizer/plan:
+    post:
+      tags: [organizer]
+      operationId: planOrganize
+      summary: Preview a reorganisation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profileID: { $ref: '#/components/schemas/UUID', description: 'Absent = the selected profile.' }
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [planHash, operations]
+                properties:
+                  planHash: { $ref: '#/components/schemas/Hex256', description: 'SHA-256 over sorted `<trackID>:<to>` lines.' }
+                  operations: { type: array, items: { $ref: '#/components/schemas/PlanOp' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/organizer/apply:
+    post:
+      tags: [organizer]
+      operationId: applyOrganize
+      summary: Apply a previewed plan if it is unchanged
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [planHash]
+              properties:
+                profileID: { $ref: '#/components/schemas/UUID' }
+                planHash: { $ref: '#/components/schemas/Hex256' }
+      responses:
+        '200':
+          description: Result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [moved, unchanged]
+                properties:
+                  moved: { type: integer }
+                  unchanged: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: '`planStale`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/playlists:
+    get:
+      tags: [playlists]
+      operationId: listPlaylists
+      summary: All of this user's playlists
+      responses:
+        '200':
+          description: Playlists.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playlists]
+                properties:
+                  playlists: { type: array, items: { $ref: '#/components/schemas/Playlist' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/playlists/{id}:
+    parameters: [{ $ref: '#/components/parameters/UUIDPath' }]
+    get:
+      tags: [playlists]
+      operationId: getPlaylist
+      summary: One playlist
+      responses:
+        '200':
+          description: The playlist.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Playlist' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    put:
+      tags: [playlists]
+      operationId: putPlaylist
+      summary: Create or replace a playlist (its id must match the path)
+      requestBody:
+        required: true
+        description: ≤ 8 MiB.
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Playlist' }
+      responses:
+        '204': { description: 'Stored.' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    delete:
+      tags: [playlists]
+      operationId: deletePlaylist
+      summary: Delete a playlist
+      responses:
+        '204': { description: 'Deleted.' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/prefs:
+    get:
+      tags: [prefs]
+      operationId: getPrefs
+      summary: Preferences, with defaults filled in
+      responses:
+        '200':
+          description: Prefs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Prefs' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    patch:
+      tags: [prefs]
+      operationId: patchPrefs
+      summary: Update any subset of Prefs
+      description: Named `clients` keys are replaced; a `null` value removes that key.
+      requestBody:
+        required: true
+        description: '≤ 8 MiB.'
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Prefs' }
+      responses:
+        '200':
+          description: The resulting Prefs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Prefs' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/history:
+    get:
+      tags: [history]
+      operationId: getHistory
+      summary: Play events after a sequence, and all recent contexts
+      parameters:
+        - $ref: '#/components/parameters/Since'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 1000 }
+      responses:
+        '200':
+          description: One page of events; repeat with `seq` while `more`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, contexts, seq, more]
+                properties:
+                  events: { type: array, items: { $ref: '#/components/schemas/PlayEvent' } }
+                  contexts: { type: array, items: { $ref: '#/components/schemas/RecentContext' } }
+                  seq: { $ref: '#/components/schemas/Seq' }
+                  more: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+    post:
+      tags: [history]
+      operationId: addHistory
+      summary: Post plays (idempotent by event id) and recent contexts
+      requestBody:
+        required: true
+        description: '≤ 8 MiB.'
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                events: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/PlayEvent' } }
+                contexts: { type: array, maxItems: 1000, items: { $ref: '#/components/schemas/RecentContext' } }
+      responses:
+        '200':
+          description: Number of events newly stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { type: integer, minimum: 0 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/stats:
+    get:
+      tags: [history]
+      operationId: getStats
+      summary: Listening stats (the Mac's ListeningStore definitions)
+      parameters:
+        - { name: tz, in: query, description: 'IANA time zone for calendar days.', schema: { type: string, default: UTC } }
+        - { name: since, in: query, schema: { $ref: '#/components/schemas/Date' } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        '200':
+          description: Stats; absent results are omitted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Stats' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+  /v2/admin/status:
+    get:
+      tags: [admin]
+      operationId: getAdminStatus
+      summary: Server status (admin users only)
+      responses:
+        '200':
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503': { $ref: '#/components/responses/LibraryOffline' }
+        default: { $ref: '#/components/responses/InternalFailure' }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Device token from sign-in (256 random bits, base64url, 43 chars). Never expires; ends when revoked.
+
+  parameters:
+    UUIDPath:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/UUID' }
+    Since:
+      name: since
+      in: query
+      schema: { type: integer, minimum: 0, maximum: 9007199254740992, default: 0 }
+
+  headers:
+    UploadOffset:
+      description: The server's offset (bytes received).
+      schema: { type: integer, minimum: 0 }
+    FileETag:
+      description: '`"sha256:<contentHash>"` once hashed (strong), else `"m:<size>-<mtime ns>"`.'
+      schema: { type: string }
+
+  responses:
+    Audio:
+      description: 'The file as stored. `Accept-Ranges: bytes`.'
+      headers:
+        ETag: { $ref: '#/components/headers/FileETag' }
+        Cache-Control:
+          description: '`private, no-cache`.'
+          schema: { type: string }
+      content:
+        audio/flac: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/mpeg: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/wav: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/aiff: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/mp4: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/aac: { schema: { $ref: '#/components/schemas/Binary' } }
+    AudioPartial:
+      description: The requested range of the original file.
+      headers:
+        ETag: { $ref: '#/components/headers/FileETag' }
+        Content-Range: { schema: { type: string } }
+        Cache-Control:
+          description: '`private, no-cache`.'
+          schema: { type: string }
+      content:
+        audio/flac: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/mpeg: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/wav: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/aiff: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/mp4: { schema: { $ref: '#/components/schemas/Binary' } }
+        audio/aac: { schema: { $ref: '#/components/schemas/Binary' } }
+    NotModified:
+      description: Not modified.
+    BadRequest:
+      description: '`badRequest` or `unsupportedFormat`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: '`unauthorized`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InvalidCredentials:
+      description: '`invalidCredentials`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    UnauthorizedOrCredentials:
+      description: '`unauthorized` (token) or `invalidCredentials` (wrong current password).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: '`forbidden`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: '`notFound` (for this user).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    TooLarge:
+      description: '`sizeExceeded`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: '`rateLimited`. Authenticated endpoints count unknown tokens per IP; a wrong current password counts per username (§6).'
+      headers:
+        Retry-After:
+          description: Seconds to wait.
+          schema: { type: integer, minimum: 1 }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    LibraryOffline:
+      description: '`libraryOffline` (§9.5); on any authenticated endpoint, briefly while the server starts.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unavailable:
+      description: '`libraryOffline`, or `transcodeUnavailable` (no transcoder or all slots busy).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InsufficientStorage:
+      description: '`insufficientStorage` (quota, or less than 500 MB would stay free).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InternalFailure:
+      description: '`internalFailure`.'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+      description: Written uppercase with hyphens; any case accepted.
+      examples: ['9F1C2B3A-4D5E-4F60-8A7B-0C1D2E3F4A5B']
+    Date:
+      type: string
+      format: date-time
+      description: UTC, millisecond precision when written; any number of fractional digits accepted.
+      examples: ['2026-09-08T17:04:01.687Z']
+    Hex256:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+      description: Lowercase hex SHA-256.
+    Seq:
+      type: integer
+      minimum: 0
+      description: Change sequence (§11).
+    Binary:
+      type: string
+      contentMediaType: application/octet-stream
+    Format:
+      type: string
+      enum: [flac, mp3, wav, aiff, alac, aac]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [badRequest, unsupportedFormat, unauthorized, invalidCredentials, forbidden,
+                notFound, offsetMismatch, planStale, sizeExceeded, hashMismatch, rateLimited, libraryOffline,
+                transcodeUnavailable, insufficientStorage, internalFailure]
+            message: { type: string, description: 'For logs only; clients key on `code`.' }
+
+    ServerInfo:
+      type: object
+      required: [id, name, protocol, version, transcoding]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        protocol: { type: string, const: '2.0' }
+        version: { type: string }
+        transcoding: { type: boolean }
+
+    LoginRequest:
+      type: object
+      required: [username, password, deviceName, deviceKind]
+      properties:
+        username: { type: string, pattern: '^[a-z][a-z0-9_-]{0,31}$' }
+        password: { type: string }
+        deviceName: { type: string, minLength: 1, description: '≤ 63 UTF-8 bytes.' }
+        deviceKind: { type: string, enum: [mac, iPhone, iPad, windows, linux, other] }
+    LoginResponse:
+      type: object
+      required: [token, device, user]
+      properties:
+        token: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' }
+        device: { $ref: '#/components/schemas/Device' }
+        user: { $ref: '#/components/schemas/User' }
+    Device:
+      type: object
+      required: [id, name, kind, created, lastSeen, current]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        kind: { type: string }
+        created: { $ref: '#/components/schemas/Date' }
+        lastSeen: { $ref: '#/components/schemas/Date' }
+        current: { type: boolean }
+    User:
+      type: object
+      required: [id, name, isAdmin]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        isAdmin: { type: boolean }
+
+    LibraryInfo:
+      type: object
+      required: [libraryID, state, seq, trackCount, pendingHashes, usedBytes, quotaBytes, freeBytes]
+      properties:
+        libraryID: { $ref: '#/components/schemas/UUID' }
+        state: { $ref: '#/components/schemas/LibraryState' }
+        seq: { $ref: '#/components/schemas/Seq' }
+        trackCount: { type: integer }
+        pendingHashes: { type: integer, description: 'Tracks not yet hashed; absent from manifests until done.' }
+        usedBytes: { type: integer }
+        quotaBytes: { type: [integer, 'null'], description: 'null = no quota.' }
+        freeBytes: { type: integer }
+    LibraryState:
+      type: string
+      enum: [scanning, ready, offline]
+
+    Track:
+      type: object
+      description: Optional values are omitted when absent.
+      required: [id, relativePath, format, fileSize, contentHash, tagFingerprint, title, artistIsList, albumArtistIsList,
+        secondaryGenres, isCompilation, isMixCompilation, duration, sampleRate, channels, bitrate, frames, hasCueSheet,
+        dateAdded, modified]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        relativePath: { type: string }
+        format: { $ref: '#/components/schemas/Format' }
+        fileSize: { type: integer }
+        contentHash: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$', description: 'null until hashed.' }
+        tagFingerprint: { $ref: '#/components/schemas/Hex256' }
+        title: { type: string, description: 'Never empty; falls back to the file name.' }
+        artist: { type: string, description: 'Stored credit string (§8.3).' }
+        artistIsList: { type: boolean }
+        albumArtist: { type: string }
+        albumArtistIsList: { type: boolean }
+        album: { type: string }
+        trackNumber: { type: integer }
+        discNumber: { type: integer }
+        discTotal: { type: integer }
+        year: { type: integer }
+        genre: { type: string }
+        secondaryGenres: { type: array, items: { type: string } }
+        isCompilation: { type: boolean }
+        isMixCompilation: { type: boolean }
+        label: { type: string }
+        duration: { type: number, description: 'Seconds.' }
+        sampleRate: { type: integer }
+        bitDepth: { type: integer, description: 'Absent for mp3 and aac.' }
+        channels: { type: integer }
+        bitrate: { type: integer, description: 'kbit/s.' }
+        frames: { type: integer, description: 'Sample frames; exact for flac, wav, aiff.' }
+        artworkID: { type: string, pattern: '^[0-9a-f]{32}$', description: 'Absent when the file has no picture.' }
+        hasCueSheet: { type: boolean }
+        dateAdded: { $ref: '#/components/schemas/Date' }
+        modified: { $ref: '#/components/schemas/Date' }
+    TrackDetail:
+      allOf:
+        - $ref: '#/components/schemas/Track'
+        - type: object
+          properties:
+            cueSheet: { type: string, description: 'Raw tag text, when present.' }
+            lyrics: { type: string, description: 'Raw tag text, when present.' }
+
+    Album:
+      type: object
+      required: [id, name, secondaryGenres, isCompilation, isMixCompilation, trackIDs]
+      properties:
+        id: { type: string, description: '`<albumArtist or display artist>|<album name>` (§8.4).' }
+        name: { type: string }
+        artist: { type: string }
+        albumArtist: { type: string }
+        year: { type: integer }
+        genre: { type: string }
+        secondaryGenres: { type: array, items: { type: string } }
+        label: { type: string }
+        artworkID: { type: string }
+        isCompilation: { type: boolean }
+        isMixCompilation: { type: boolean }
+        trackIDs: { type: array, items: { $ref: '#/components/schemas/UUID' } }
+
+    Edit:
+      type: object
+      description: >-
+        Every field is three-state: absent leaves the tag alone, `null` clears
+        it, a value sets it.
+      properties:
+        title: { type: [string, 'null'] }
+        artist: { type: [string, 'null'], description: 'Credit string; `"A ; B"` for a list.' }
+        albumArtist: { type: [string, 'null'], description: 'Credit string; `"A ; B"` for a list.' }
+        album: { type: [string, 'null'] }
+        trackNumber: { type: [integer, 'null'] }
+        discNumber: { type: [integer, 'null'] }
+        discTotal: { type: [integer, 'null'] }
+        year: { type: [integer, 'null'] }
+        genre: { type: [string, 'null'] }
+        secondaryGenres: { type: [array, 'null'], items: { type: string } }
+        isCompilation: { type: [boolean, 'null'], description: 'Turning on clears isMixCompilation.' }
+        isMixCompilation: { type: [boolean, 'null'], description: 'Turning on clears isCompilation and lyrics.' }
+        label: { type: [string, 'null'] }
+        lyrics: { type: [string, 'null'] }
+        cueSheet: { type: [string, 'null'] }
+        artwork:
+          type: [string, 'null']
+          contentEncoding: base64
+          description: JPEG or PNG, ≤ 10 MiB and ≤ 10 000 px per side; `null` removes it.
+
+    UploadRequest:
+      type: object
+      required: [filename, size, contentHash]
+      properties:
+        filename: { type: string, description: 'Supplies only the extension: flac mp3 wav wave aif aiff m4a aac, any case.' }
+        size: { type: integer, minimum: 0, maximum: 2147483648 }
+        contentHash: { $ref: '#/components/schemas/Hex256' }
+        trackID: { $ref: '#/components/schemas/UUID', description: 'Known = replace that track; unknown = adopted as the new ID.' }
+    Upload:
+      type: object
+      required: [id, offset]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        offset: { type: integer, minimum: 0 }
+
+    Selection:
+      type: object
+      description: Union of the albums, the playlists' tracks and the tracks named. Absent = the whole library.
+      properties:
+        albumIDs: { type: array, items: { type: string } }
+        playlistIDs: { type: array, items: { $ref: '#/components/schemas/UUID' } }
+        trackIDs: { type: array, items: { $ref: '#/components/schemas/UUID' } }
+    SyncFilter:
+      type: object
+      properties:
+        excludedFormats: { type: array, items: { $ref: '#/components/schemas/Format' }, default: [] }
+        excludedArtistKeys: { type: array, items: { type: string }, default: [] }
+        maxFileSizeBytes: { type: integer }
+        includePlaylists: { type: boolean, default: true }
+        playlistIDAllowlist: { type: array, items: { $ref: '#/components/schemas/UUID' }, description: 'Absent = all.' }
+        maxTotalTransferBytes: { type: integer, description: 'Client-side ceiling for one refresh.' }
+    LibraryManifest:
+      type: object
+      required: [deviceID, generatedAt, tracks, playlists]
+      properties:
+        deviceID: { $ref: '#/components/schemas/UUID', description: 'The library''s ID.' }
+        generatedAt: { $ref: '#/components/schemas/Date' }
+        tracks: { type: array, items: { $ref: '#/components/schemas/TrackManifestEntry' } }
+        playlists: { type: array, items: { $ref: '#/components/schemas/PlaylistManifestEntry' } }
+    TrackManifestEntry:
+      type: object
+      required: [trackID, relativePath, fileSize, contentHash, format, tagFingerprint, title]
+      properties:
+        trackID: { $ref: '#/components/schemas/UUID' }
+        relativePath: { type: string }
+        fileSize: { type: integer }
+        contentHash: { $ref: '#/components/schemas/Hex256' }
+        format: { $ref: '#/components/schemas/Format' }
+        tagFingerprint: { $ref: '#/components/schemas/Hex256' }
+        title: { type: string }
+        artist: { type: string }
+        album: { type: string }
+        albumArtist: { type: string }
+    PlaylistManifestEntry:
+      type: object
+      required: [id, name, dateCreated, entryCount, contentHash]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        dateCreated: { $ref: '#/components/schemas/Date' }
+        entryCount: { type: integer }
+        contentHash: { $ref: '#/components/schemas/Hex256' }
+
+    Organizer:
+      type: object
+      required: [profiles]
+      properties:
+        profiles: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/OrganizerProfile' } }
+        selectedID: { $ref: '#/components/schemas/UUID' }
+    OrganizerProfile:
+      type: object
+      description: >-
+        The Mac's JSON. Templates use tokens {artist} {albumArtist} {album}
+        {title} {track} {year} {decade} {genre} {format} {ext} {artistInitial}.
+      required: [id, name, levels, fileTemplate]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string }
+        levels:
+          type: array
+          items:
+            type: object
+            required: [id, groupBy, nameTemplate]
+            properties:
+              id: { $ref: '#/components/schemas/UUID' }
+              groupBy:
+                type: string
+                enum: [albumArtist, artist, album, genre, year, decade, format, firstLetterOfArtist]
+              name: { type: string }
+              nameTemplate: { type: string }
+        fileTemplate: { type: string }
+        usePrimaryArtistOnly: { type: boolean }
+        deleteEmptyOriginals: { type: boolean }
+    PlanOp:
+      type: object
+      required: [trackID, from, to, status]
+      properties:
+        trackID: { $ref: '#/components/schemas/UUID' }
+        from: { type: string }
+        to: { type: string }
+        status: { type: string, enum: [move, unchanged, conflict] }
+
+    Playlist:
+      type: object
+      required: [id, name, entries, dateCreated]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        name: { type: string, maxLength: 255 }
+        entries:
+          type: array
+          maxItems: 10000
+          items:
+            type: object
+            required: [id, relativePath]
+            properties:
+              id: { $ref: '#/components/schemas/UUID' }
+              trackID: { $ref: '#/components/schemas/UUID' }
+              relativePath: { type: string, description: 'Stored as given; never a filesystem path.' }
+        dateCreated: { $ref: '#/components/schemas/Date' }
+        customArtwork: { type: string, contentEncoding: base64, description: '≤ 5 MiB.' }
+        description: { type: string, maxLength: 200 }
+
+    Prefs:
+      type: object
+      properties:
+        streamQuality: { type: string, enum: [original, auto, high, normal, low], default: original }
+        artistSeparator: { type: string, enum: [', ', '; ', ' ; ', ' / ', ' & '], default: ', ' }
+        clients:
+          type: object
+          description: Per-client settings (e.g. key `mac`), each ≤ 64 KiB; keys ≤ 64 bytes. Never credentials.
+          maxProperties: 64
+          propertyNames: { maxLength: 64 }
+          additionalProperties: true
+
+    PlayEvent:
+      type: object
+      required: [id, date, trackID, title, secondsListened, counted]
+      properties:
+        id: { $ref: '#/components/schemas/UUID' }
+        date: { $ref: '#/components/schemas/Date' }
+        trackID: { $ref: '#/components/schemas/UUID' }
+        title: { type: string }
+        artist: { type: string }
+        albumID: { type: string }
+        album: { type: string }
+        genre: { type: string }
+        secondaryGenres: { type: array, items: { type: string } }
+        secondsListened: { type: number }
+        counted: { type: boolean }
+    RecentContext:
+      type: object
+      required: [kind, targetID, title, subtitle, date]
+      properties:
+        kind: { type: string, enum: [album, playlist] }
+        targetID: { type: string }
+        title: { type: string }
+        subtitle: { type: string }
+        date: { $ref: '#/components/schemas/Date' }
+
+    Stats:
+      type: object
+      required: [totalSeconds, tracksPlayed, albumsPlayed, sessions, streakDays, topArtists, topAlbums]
+      properties:
+        totalSeconds: { type: number }
+        tracksPlayed: { type: integer }
+        albumsPlayed: { type: integer }
+        sessions: { type: integer }
+        streakDays: { type: integer }
+        topArtists:
+          type: array
+          items:
+            type: object
+            required: [name, plays, minutes]
+            properties:
+              name: { type: string }
+              plays: { type: integer }
+              minutes: { type: number }
+        topAlbums: { type: array, items: { $ref: '#/components/schemas/AlbumRank' } }
+        topGenre:
+          type: object
+          required: [name, share]
+          properties:
+            name: { type: string }
+            share: { type: number, minimum: 0, maximum: 1 }
+        onThisDay:
+          allOf:
+            - $ref: '#/components/schemas/AlbumRank'
+            - type: object
+              required: [headline, date]
+              properties:
+                headline: { type: string }
+                date: { $ref: '#/components/schemas/Date' }
+    AlbumRank:
+      type: object
+      required: [albumID, album, artist, plays, minutes]
+      properties:
+        albumID: { type: string }
+        album: { type: string }
+        artist: { type: string }
+        plays: { type: integer }
+        minutes: { type: number }
+
+    AdminStatus:
+      type: object
+      required: [version, uptime, users]
+      properties:
+        version: { type: string }
+        uptime: { type: integer, description: 'Seconds.' }
+        users:
+          type: array
+          items:
+            type: object
+            required: [name, state, trackCount, pendingHashes, usedBytes, quotaBytes]
+            properties:
+              name: { type: string }
+              state: { $ref: '#/components/schemas/LibraryState' }
+              trackCount: { type: integer }
+              pendingHashes: { type: integer }
+              usedBytes: { type: integer }
+              quotaBytes: { type: [integer, 'null'] }

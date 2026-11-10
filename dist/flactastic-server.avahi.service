@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">FLACtastic on %h</name>
+  <service>
+    <type>_flactastic-srv._tcp</type>
+    <port>4410</port>
+    <txt-record>v=2.0</txt-record>
+    <txt-record>id=@ID@</txt-record>
+    <txt-record>n=@NAME@</txt-record>
+  </service>
+</service-group>

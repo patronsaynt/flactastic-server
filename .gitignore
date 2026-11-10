@@ -1,0 +1,7 @@
+/.deps/
+/flactastic-server
+# fetched by tools/vectors/fetch.sh
+/tools/vectors/.build/
+/tools/vectors/fixtures/
+/tools/vectors/Sources/Mac/
+/tools/vectors/Sources/CTagLibHelper/
