@@ -454,6 +454,11 @@ paths:
               schema: { $ref: '#/components/schemas/Upload' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: '`duplicate`: the library already has these bytes. `error.track` is the existing track.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/LibraryOffline' }
@@ -1120,9 +1125,12 @@ components:
             code:
               type: string
               enum: [badRequest, unsupportedFormat, unauthorized, invalidCredentials, forbidden,
-                notFound, offsetMismatch, planStale, sizeExceeded, hashMismatch, rateLimited, libraryOffline,
+                notFound, duplicate, offsetMismatch, planStale, sizeExceeded, hashMismatch, rateLimited, libraryOffline,
                 transcodeUnavailable, insufficientStorage, internalFailure]
             message: { type: string, description: 'For logs only; clients key on `code`.' }
+            track:
+              allOf: [{ $ref: '#/components/schemas/Track' }]
+              description: 'With `duplicate` only: the track the library already has.'
 
     ServerInfo:
       type: object

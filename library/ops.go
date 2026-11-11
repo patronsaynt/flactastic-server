@@ -45,6 +45,11 @@ var (
 	uploadLocks    sync.Map
 )
 
+// Duplicate refuses an upload of bytes the library already has.
+type Duplicate struct{ Track Track }
+
+func (Duplicate) Error() string { return "duplicate" }
+
 // Organizer is the user's stored profiles (protocol §12).
 type Organizer struct {
 	Profiles   []meta.Profile `json:"profiles"`
@@ -164,6 +169,13 @@ func (l *Library) CreateUpload(filename string, size int64, hash string, track *
 		trackID = &s
 	}
 	var id string
+	if track == nil && l.db.QueryRow("SELECT id FROM tracks WHERE hash = ? AND size = ? AND path IS NOT NULL", hash, size).Scan(&id) == nil {
+		if have, err := meta.ParseUUID(id); err == nil {
+			if t, err := l.Track(have); err == nil {
+				return Upload{}, Duplicate{t}
+			}
+		}
+	}
 	if l.db.QueryRow("SELECT id FROM uploads WHERE hash = ? AND size = ? AND track IS ?", hash, size, trackID).Scan(&id) == nil {
 		return l.UploadStatus(id)
 	}
@@ -309,7 +321,7 @@ func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	}
 	l.db.Exec("DELETE FROM uploads WHERE id = ?", u.ID)
 	uploadLocks.Delete(u.ID)
-	if err := l.index(r, dest); err != nil {
+	if err := l.index(r, dest, u.hash); err != nil {
 		return nil, err
 	}
 	l.saveSidecar(r)

@@ -279,6 +279,9 @@ func (srv *Server) createUpload(w http.ResponseWriter, r *http.Request, s sessio
 		return err
 	}
 	u, err := s.lib.CreateUpload(in.Filename, in.Size, in.ContentHash, in.TrackID)
+	if dup, is := err.(library.Duplicate); is {
+		return reply(w, http.StatusConflict, map[string]any{"error": map[string]any{"code": "duplicate", "message": "duplicate", "track": dup.Track}})
+	}
 	if err != nil {
 		return err
 	}

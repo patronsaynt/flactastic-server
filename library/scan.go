@@ -246,8 +246,9 @@ func underAny(rel string, dirs []string) bool {
 	return false
 }
 
-// index reads one file and records it. Callers hold l.mu.
-func (l *Library) index(r *Root, rel string) error {
+// index reads one file and records it, with its content hash when the
+// caller has just verified one. Callers hold l.mu.
+func (l *Library) index(r *Root, rel string, hash ...string) error {
 	f, err := r.Open(rel, unix.O_RDONLY, 0)
 	if err != nil {
 		return err
@@ -283,6 +284,9 @@ func (l *Library) index(r *Root, rel string) error {
 		Scan(&oldHash, &oldSize, &oldMtime, &oldInode, &oldAdded)
 	if oldSize != int64(st.Size) || oldMtime != mtime.UnixNano() || oldInode != int64(st.Ino) {
 		oldHash = nil
+	}
+	if len(hash) > 0 {
+		oldHash = &hash[0]
 	}
 	if a, err := time.Parse(time.RFC3339Nano, oldAdded); err == nil {
 		added = a

@@ -169,6 +169,7 @@ which part was wrong.
 | 401 | `invalidCredentials` | Sign-in failed |
 | 403 | `forbidden` | Admin-only endpoint |
 | 404 | `notFound` | No such object **for this user** |
+| 409 | `duplicate` | The library already has these bytes; `error.track` is the existing Track (§9.4) |
 | 409 | `offsetMismatch` | Upload offset is not where the server is |
 | 409 | `planStale` | The library changed since the plan was shown |
 | 413 | `sizeExceeded` | Body or declared file over its limit |
@@ -502,6 +503,11 @@ POST /v2/uploads
   absent) while an upload is open returns that upload and its current
   offset, so a client that lost the `id` can resume.
 - A `contentHash` that is not 64 hex digits is `400 badRequest`.
+- Without a `trackID`, when the library already holds a track with the same
+  `contentHash` and `size`, nothing is staged and the answer is `409
+  duplicate`, with the existing track in the error:
+  `{ "error": { "code": "duplicate", "message": "…", "track": Track } }`.
+  Tracks the server has not hashed yet (`contentHash: null`) are not matched.
 
 Send bytes:
 
@@ -527,7 +533,8 @@ On the last byte the server: verifies SHA-256 over the whole staged file
 resuming over them would only reproduce the failure); reads its tags; places
 it with the user's Organizer profile (§12); writes the `trackID`; and
 installs it with an atomic rename, so readers see the old file or the new
-one, never a gap. Staged uploads untouched for 7 days are deleted.
+one, never a gap. The returned Track already carries the verified
+`contentHash`. Staged uploads untouched for 7 days are deleted.
 
 ### 9.5 When the music folder is unavailable
 

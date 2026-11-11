@@ -274,11 +274,36 @@ func upload(e *env, token string, data []byte, filename string, trackID *string)
 func TestUploadEditDelete(t *testing.T) {
 	e := setup(t)
 	data, _ := os.ReadFile("../testdata/audio/cur-single.flac")
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	// The library already has these bytes, so a second copy is refused and nothing is staged.
+	refused := func(path string) {
+		t.Helper()
+		before := len(e.tracks(e.alice))
+		dup := e.json(e.alice, "POST", "/v2/uploads", map[string]any{"filename": "x.flac", "size": len(data), "contentHash": hash}, 409)
+		have, _ := dup["error"].(map[string]any)["track"].(map[string]any)
+		staged, _ := os.ReadDir(filepath.Join(e.aRoot, ".flactastic", "incoming"))
+		if errCode(dup) != "duplicate" || have["relativePath"] != path || len(e.tracks(e.alice)) != before || len(staged) != 0 {
+			t.Fatalf("duplicate of %s: %v, %d staged", path, dup, len(staged))
+		}
+	}
+	refused("cur-single.flac")
+	e.json(e.alice, "DELETE", "/v2/tracks/"+e.tracks(e.alice)["cur-single.flac"]["id"].(string), nil, 204)
 	out, status := upload(e, e.alice, data, "../../../etc/whatever.FLAC", nil)
 	if status != 200 {
 		t.Fatalf("upload: %d %v", status, out)
 	}
 	tr := out["track"].(map[string]any)
+	if tr["contentHash"] != hash {
+		t.Fatalf("contentHash %v, want %s", tr["contentHash"], hash)
+	}
+	refused(tr["relativePath"].(string))
+	// A replacement names its track, so the same bytes are accepted.
+	trackID := tr["id"].(string)
+	if again, status := upload(e, e.alice, data, "x.flac", &trackID); status != 200 || again["track"].(map[string]any)["id"] != trackID ||
+		again["track"].(map[string]any)["contentHash"] != hash {
+		t.Fatalf("replacement: %d %v", status, again)
+	}
 	// The default profile: {albumArtist}/{album} ({year})/{track} - {title}.
 	if p := tr["relativePath"].(string); !strings.HasPrefix(p, "Daft Punk/") || !strings.HasSuffix(p, ".FLAC") {
 		t.Fatalf("placed at %s", p)
@@ -288,7 +313,7 @@ func TestUploadEditDelete(t *testing.T) {
 	}
 
 	bad := append([]byte{}, data...)
-	sum := sha256.Sum256([]byte("something else"))
+	sum = sha256.Sum256([]byte("something else"))
 	u := e.json(e.alice, "POST", "/v2/uploads", map[string]any{"filename": "x.flac", "size": len(bad),
 		"contentHash": hex.EncodeToString(sum[:])}, 201)
 	res := e.do(e.alice, "PATCH", "/v2/uploads/"+u["id"].(string), bytes.NewReader(bad),
@@ -320,8 +345,8 @@ func TestUploadEditDelete(t *testing.T) {
 		t.Fatalf("deleted: %v", feed)
 	}
 	trash, _ := os.ReadDir(filepath.Join(e.aRoot, ".flactastic", "trash"))
-	if len(trash) != 1 {
-		t.Fatal("not in trash")
+	if len(trash) != 2 { // the original deleted above, and this one
+		t.Fatalf("%d files in trash", len(trash))
 	}
 }
 
