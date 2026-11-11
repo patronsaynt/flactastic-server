@@ -67,9 +67,20 @@ func serve(o opts) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go libs.Run(ctx)
+	app := api.New(s, libs, version, name, ffmpeg)
+	// The session command asks the running server over this socket.
+	sock := filepath.Join(o.data, "admin.sock")
+	os.Remove(sock)
+	if admin, err := net.Listen("unix", sock); err != nil {
+		slog.Warn("no admin socket; the session command will not work", "err", err)
+	} else {
+		os.Chmod(sock, 0o600)
+		defer os.Remove(sock)
+		go http.Serve(admin, http.HandlerFunc(app.Sessions))
+	}
 	srv := &http.Server{
 		Addr:              o.listen,
-		Handler:           api.New(s, libs, version, name, ffmpeg).Handler(),
+		Handler:           app.Handler(),
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,

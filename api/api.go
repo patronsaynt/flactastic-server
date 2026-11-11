@@ -33,6 +33,7 @@ type Server struct {
 	started    time.Time
 	transcodes chan struct{}
 	failures   limiter
+	streams    streams
 }
 
 func New(s *store.Store, libs *library.Manager, version, name, ffmpeg string) *Server {

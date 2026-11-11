@@ -657,3 +657,56 @@ func TestPruneFolders(t *testing.T) {
 		t.Fatal("a scan removed a folder that was new or not empty")
 	}
 }
+
+func TestSessions(t *testing.T) {
+	e := setup(t)
+	sessions := func() Sessions {
+		rec := httptest.NewRecorder()
+		e.server.Sessions(rec, httptest.NewRequest("GET", "/?log", nil))
+		var v Sessions
+		json.Unmarshal(rec.Body.Bytes(), &v)
+		return v
+	}
+	var ids []string
+	for _, tr := range e.tracks(e.alice) {
+		ids = append(ids, tr["id"].(string))
+	}
+	play := func(token, id, query string, headers map[string]string) int {
+		res := e.do(token, "GET", "/v2/tracks/"+id+"/stream"+query, nil, headers)
+		n, _ := io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		return int(n)
+	}
+	n := play(e.alice, ids[0], "", nil)
+	n += play(e.alice, ids[0], "", map[string]string{"Range": "bytes=0-99"})
+	v := sessions()
+	if len(v.Live) != 1 || len(v.Log) != 0 {
+		t.Fatalf("after one track: %+v", v)
+	}
+	s := v.Live[0]
+	if s.User != "alice" || s.Device != "Test" || s.Track != ids[0] || s.Quality != "original" || s.Bytes != int64(n) ||
+		s.Requests != 2 || s.Sending != 0 || s.Ended.IsZero() || s.Offset != "bytes=0-99" || s.Title == "" || s.Path == "" {
+		t.Fatalf("stream: %+v", s)
+	}
+	// The file endpoint (offline copies) is not a session, and a bad request is not recorded.
+	e.do(e.alice, "GET", "/v2/tracks/"+ids[1]+"/file", nil, nil).Body.Close()
+	play(e.alice, ids[1], "?quality=nonsense", nil)
+	// A third track retires the oldest: the device has moved on.
+	play(e.alice, ids[1], "", nil)
+	play(e.alice, ids[2], "", nil)
+	v = sessions()
+	if len(v.Live) != 2 || len(v.Log) != 1 || v.Log[0].Track != ids[0] || v.Live[1].Track != ids[2] {
+		t.Fatalf("after three tracks: %+v", v)
+	}
+	// Bob's stream is his own row.
+	if play(e.bob, e.tracksOf(e.bob), "", nil); len(sessions().Live) != 3 {
+		t.Fatal("bob's stream missing")
+	}
+}
+
+func (e *env) tracksOf(token string) string {
+	for _, tr := range e.tracks(token) {
+		return tr["id"].(string)
+	}
+	return ""
+}

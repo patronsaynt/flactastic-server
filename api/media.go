@@ -37,6 +37,10 @@ func (srv *Server) file(w http.ResponseWriter, r *http.Request, s session) error
 		return err
 	}
 	defer f.Close()
+	return send(w, r, t, f)
+}
+
+func send(w http.ResponseWriter, r *http.Request, t library.Track, f *os.File) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -74,16 +78,16 @@ func outputRate(rate int) int {
 
 // stream serves the original, or an AAC transcode with the gapless trim
 // headers of protocol §9.2.
-func (srv *Server) stream(w http.ResponseWriter, r *http.Request, s session) error {
+func (srv *Server) stream(w http.ResponseWriter, r *http.Request, s session) (err error) {
 	q := r.URL.Query().Get("quality")
-	if q == "" || q == "original" {
-		return srv.file(w, r, s)
+	if q == "" {
+		q = "original"
 	}
 	bitrate, known := bitrates[q]
-	if !known {
+	if q != "original" && !known {
 		return errBadRequest
 	}
-	if srv.FFmpeg == "" {
+	if q != "original" && srv.FFmpeg == "" {
 		return errTranscode
 	}
 	t, f, err := srv.openTrack(r, s)
@@ -91,6 +95,11 @@ func (srv *Server) stream(w http.ResponseWriter, r *http.Request, s session) err
 		return err
 	}
 	defer f.Close()
+	w, done := srv.watch(w, r, s, t, q)
+	defer func() { done(err) }()
+	if q == "original" {
+		return send(w, r, t, f)
+	}
 	if t.SampleRate <= 0 {
 		return errTranscode
 	}

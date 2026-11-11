@@ -45,6 +45,8 @@ flactastic-server user set NAME [--root PATH] [--quota SIZE|none] [--admin=true|
 flactastic-server user del NAME              never touches their music
 flactastic-server device list [NAME]
 flactastic-server device revoke ID
+flactastic-server session [--user NAME]      live board of active streams
+flactastic-server session log                streams that have finished
 flactastic-server scan [NAME]                rescan now
 flactastic-server rebuild [NAME]             re-read every file's tags
 flactastic-server backup DIR                 copy every database, safe while running

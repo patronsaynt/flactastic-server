@@ -35,27 +35,29 @@ Usage:
   flactastic-server user del NAME
   flactastic-server device list [NAME]
   flactastic-server device revoke ID
+  flactastic-server session [list|log] [--user NAME]
   flactastic-server scan [NAME]
   flactastic-server rebuild [NAME]
   flactastic-server backup DIR
   flactastic-server version
 
 Every command takes --data DIR (default /var/lib/flactastic-server).
+session shows active streams, live on a terminal; session log shows finished ones.
 SIZE is bytes or a number with K, M, G or T. Removing a user never touches their music.
 `
 
 const dropIn = "/etc/systemd/system/flactastic-server.service.d/libraries.conf"
 
 type opts struct {
-	data, listen, root, quota, admin string
-	passwordStdin                    bool
-	args                             []string
+	data, listen, root, quota, admin, user string
+	passwordStdin                          bool
+	args                                   []string
 }
 
 // parse accepts flags anywhere, so a name can come before them.
 func parse(args []string) (opts, error) {
 	o := opts{data: "/var/lib/flactastic-server", listen: ":4410"}
-	values := map[string]*string{"--data": &o.data, "--listen": &o.listen, "--root": &o.root, "--quota": &o.quota, "--admin": &o.admin}
+	values := map[string]*string{"--data": &o.data, "--listen": &o.listen, "--root": &o.root, "--quota": &o.quota, "--admin": &o.admin, "--user": &o.user}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "--") {
@@ -98,6 +100,8 @@ func run(args []string) error {
 	switch o.args[0] {
 	case "serve":
 		return serve(o)
+	case "session":
+		return session(o)
 	case "version":
 		fmt.Println(version)
 		return nil
