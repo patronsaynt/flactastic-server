@@ -45,6 +45,7 @@ func (m *Manager) Run(ctx context.Context) {
 				if r[0] == "rebuild" {
 					l.db.Exec("UPDATE tracks SET mtime = 0")
 				}
+				l.report.Store(true)
 				l.Scan()
 			}
 		}

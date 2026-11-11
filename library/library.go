@@ -38,6 +38,7 @@ type Library struct {
 	state   atomic.Value
 	mu      sync.Mutex // serialises changes to files and the index
 	wake    chan struct{}
+	report  atomic.Bool // the CLI is waiting for the next scan's ScanReport
 	hashing chan struct{}
 	stop    context.CancelFunc
 	done    sync.WaitGroup
@@ -186,6 +187,9 @@ func (l *Library) attach() bool {
 			slog.Warn("library offline", "user", l.User.Name, "root", l.User.Root, "err", err)
 		}
 		l.setState(StateOffline)
+		if l.report.Swap(false) {
+			l.saveReport(ScanReport{Error: err.Error()})
+		}
 		return false
 	}
 	l.root.Store(r)

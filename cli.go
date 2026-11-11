@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -115,17 +117,24 @@ func run(args []string) error {
 		}
 		return ""
 	}
+	// said prints what was done once it has been.
+	said := func(err error, format string, a ...any) error {
+		if err == nil {
+			fmt.Printf(format+"\n", a...)
+		}
+		return err
+	}
 	switch {
 	case cmd == "info":
 		return info(o, s)
 	case cmd == "user add":
-		return userAdd(o, s, arg(2))
+		return said(userAdd(o, s, arg(2)), "Added user %s with library %s.", arg(2), o.root)
 	case cmd == "user list":
 		return userList(s)
 	case cmd == "user passwd":
-		return userPasswd(o, s, arg(2))
+		return said(userPasswd(o, s, arg(2)), "Changed the password for %s and signed out their devices.", arg(2))
 	case cmd == "user set":
-		return userSet(o, s, arg(2))
+		return said(userSet(o, s, arg(2)), "Updated %s.", arg(2))
 	case cmd == "user del":
 		u, err := s.UserByName(arg(2))
 		if err != nil {
@@ -134,19 +143,16 @@ func run(args []string) error {
 		if err := s.DeleteUser(u.Name); err != nil {
 			return err
 		}
-		return os.RemoveAll(filepath.Join(o.data, "users", u.ID))
+		return said(os.RemoveAll(filepath.Join(o.data, "users", u.ID)), "Removed user %s. Their music in %s was not touched.", u.Name, u.Root)
 	case cmd == "device list":
 		return deviceList(s, arg(2))
 	case cmd == "device revoke":
-		return s.RevokeDevice(arg(2), "")
-	case o.args[0] == "scan", o.args[0] == "rebuild":
-		users, err := s.Users()
-		for _, u := range users {
-			if arg(1) == "" || u.Name == arg(1) {
-				err = errors.Join(err, s.Request(o.args[0], u.ID))
-			}
+		if err := s.RevokeDevice(arg(2), ""); err != nil {
+			return fmt.Errorf("no device %q", arg(2))
 		}
-		return err
+		return said(nil, "Signed out device %s.", arg(2))
+	case o.args[0] == "scan", o.args[0] == "rebuild":
+		return scan(o, s, arg(1))
 	case o.args[0] == "backup" && arg(1) != "":
 		return backup(o, s, arg(1))
 	}
@@ -325,6 +331,9 @@ func userSet(o opts, s *store.Store, name string) error {
 func userList(s *store.Store) error {
 	users, err := s.Users()
 	if err != nil || len(users) == 0 {
+		if err == nil {
+			fmt.Println("No users yet. Add one with: flactastic-server user add NAME --root PATH")
+		}
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -358,6 +367,70 @@ func deviceList(s *store.Store, name string) error {
 	return w.Flush()
 }
 
+// scan asks the running server to scan or rebuild, waits, and prints what
+// each scan found.
+func scan(o opts, s *store.Store, name string) error {
+	users, err := s.Users()
+	if err != nil {
+		return err
+	}
+	failed := 0
+	for _, u := range users {
+		if name != "" && u.Name != name {
+			continue
+		}
+		name = "" // found
+		db, err := store.Open(filepath.Join(o.data, "users", u.ID, "index.db"))
+		if err == nil {
+			_, err = db.Exec("DELETE FROM docs WHERE key = 'scan'")
+		}
+		if err == nil {
+			err = s.Request(o.args[0], u.ID)
+		}
+		if err != nil {
+			if db != nil {
+				db.Close()
+			}
+			return fmt.Errorf("%s: %w (has the server started since this user was added?)", u.Name, err)
+		}
+		fmt.Printf("%s: %s requested, waiting for the server...\n", u.Name, o.args[0])
+		var rep library.ScanReport
+		for start, data := time.Now(), []byte(nil); ; time.Sleep(500 * time.Millisecond) {
+			if db.QueryRow("SELECT data FROM docs WHERE key = 'scan'").Scan(&data) == nil {
+				json.Unmarshal(data, &rep)
+				break
+			}
+			var queued int
+			s.DB.QueryRow("SELECT COUNT(*) FROM requests WHERE user = ?", u.ID).Scan(&queued)
+			if queued > 0 && time.Since(start) > 15*time.Second {
+				rep.Error = "the server isn't running; the " + o.args[0] + " will run when it starts"
+				break
+			}
+		}
+		db.Close()
+		if rep.Error != "" {
+			failed++
+			fmt.Fprintf(os.Stderr, "%s: FAILED: library %s: %s\n", u.Name, u.Root, rep.Error)
+			continue
+		}
+		fmt.Printf("%s: done. %d tracks in the library; %d read, %d removed, %d could not be read.\n",
+			u.Name, rep.Tracks, rep.Indexed, rep.Removed, rep.Failed)
+		for _, p := range rep.Problems {
+			fmt.Fprintln(os.Stderr, "  could not read "+p)
+		}
+		if rep.Failed > len(rep.Problems) {
+			fmt.Fprintf(os.Stderr, "  ...and %d more; see journalctl -u flactastic-server\n", rep.Failed-len(rep.Problems))
+		}
+	}
+	if name != "" {
+		return fmt.Errorf("no user %q", name)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d libraries could not be scanned", failed)
+	}
+	return nil
+}
+
 // backup copies every database with SQLite's VACUUM INTO, which is safe
 // while the server runs.
 func backup(o opts, s *store.Store, dir string) error {
@@ -370,21 +443,32 @@ func backup(o opts, s *store.Store, dir string) error {
 		return err
 	}
 	if err := into(s.DB, filepath.Join(dir, "server.db")); err != nil {
+		return fmt.Errorf("accounts: %w", err)
+	}
+	fmt.Println("Backed up accounts and devices.")
+	users, err := s.Users()
+	if err != nil {
 		return err
 	}
-	users, _ := s.Users()
+	failed := 0
 	for _, u := range users {
 		db, err := store.Open(filepath.Join(o.data, "users", u.ID, "index.db"))
+		if err == nil {
+			os.MkdirAll(filepath.Join(dir, "users", u.ID), 0o700)
+			err = into(db, filepath.Join(dir, "users", u.ID, "index.db"))
+			db.Close()
+		}
 		if err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "%s: FAILED: %v\n", u.Name, err)
 			continue
 		}
-		os.MkdirAll(filepath.Join(dir, "users", u.ID), 0o700)
-		err = into(db, filepath.Join(dir, "users", u.ID, "index.db"))
-		db.Close()
-		if err != nil {
-			return err
-		}
+		fmt.Printf("Backed up %s's index, playlists, history and settings.\n", u.Name)
 	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d users could not be backed up; the rest are in %s", failed, len(users), dir)
+	}
+	fmt.Printf("Backup complete in %s. Music files are not included.\n", dir)
 	return nil
 }
 

@@ -106,8 +106,31 @@ type indexed struct {
 	size, mtime, inode int64
 }
 
+// ScanReport is what a scan asked for from the CLI found.
+type ScanReport struct {
+	Error    string   `json:"error,omitempty"` // the library could not be opened
+	Tracks   int      `json:"tracks"`
+	Indexed  int      `json:"indexed"`
+	Removed  int      `json:"removed"`
+	Failed   int      `json:"failed"`
+	Problems []string `json:"problems"` // the first 200 of Failed
+}
+
+func (r *ScanReport) problem(rel string, err error) {
+	if r.Failed++; len(r.Problems) < 200 {
+		r.Problems = append(r.Problems, rel+": "+err.Error())
+	}
+}
+
+func (l *Library) saveReport(r ScanReport) {
+	b, _ := json.Marshal(r)
+	l.db.Exec("INSERT OR REPLACE INTO docs VALUES('scan', ?)", b)
+}
+
 func (l *Library) scan(watch int) {
 	r := l.root.Load()
+	var rep ScanReport
+	wanted := l.report.Swap(false)
 	l.setState(StateScanning)
 	known := map[string]indexed{}
 	rows, err := l.db.Query("SELECT path, id, size, mtime, inode FROM tracks WHERE path IS NOT NULL")
@@ -123,12 +146,13 @@ func (l *Library) scan(watch int) {
 	l.loadSidecar(r)
 
 	seen := map[string]bool{}
-	var unreadable []string
+	var unreadable, dirs []string
 	pending := false
 	filepath.WalkDir(r.Path, func(p string, d fs.DirEntry, err error) error {
 		rel, _ := filepath.Rel(r.Path, p)
 		if err != nil {
 			unreadable = append(unreadable, rel)
+			rep.problem(rel, err)
 			return fs.SkipDir
 		}
 		if rel != "." && strings.HasPrefix(d.Name(), ".") {
@@ -138,6 +162,9 @@ func (l *Library) scan(watch int) {
 			return nil
 		}
 		if d.IsDir() {
+			if rel != "." {
+				dirs = append(dirs, rel)
+			}
 			if watch >= 0 {
 				unix.InotifyAddWatch(watch, p, unix.IN_CLOSE_WRITE|unix.IN_CREATE|unix.IN_DELETE|unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_ATTRIB)
 			}
@@ -165,6 +192,9 @@ func (l *Library) scan(watch int) {
 		l.mu.Lock()
 		if err := l.index(r, rel); err != nil {
 			slog.Info("skipped unreadable file", "user", l.User.Name, "path", rel, "err", err)
+			rep.problem(rel, err)
+		} else {
+			rep.Indexed++
 		}
 		l.mu.Unlock()
 		return nil
@@ -187,7 +217,13 @@ func (l *Library) scan(watch int) {
 			continue
 		}
 		l.forget(t.id, rel)
+		rep.Removed++
 	}
+	if wanted {
+		l.db.QueryRow("SELECT COUNT(*) FROM tracks WHERE path IS NOT NULL").Scan(&rep.Tracks)
+		l.saveReport(rep)
+	}
+	l.prune(r, dirs, true)
 	l.saveSidecar(r)
 	l.sweep(r)
 	l.mu.Unlock()

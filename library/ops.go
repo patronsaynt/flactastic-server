@@ -304,6 +304,9 @@ func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	if err := r.Rename(part, dest, old != dest); err != nil {
 		return nil, err
 	}
+	if old != "" && old != dest {
+		l.tidy(r, path.Dir(old))
+	}
 	l.db.Exec("DELETE FROM uploads WHERE id = ?", u.ID)
 	uploadLocks.Delete(u.ID)
 	if err := l.index(r, dest); err != nil {
@@ -370,6 +373,7 @@ func (l *Library) Delete(id meta.UUID) error {
 		return err
 	}
 	l.forget(t.ID.String(), t.RelativePath)
+	l.tidy(r, path.Dir(t.RelativePath))
 	l.saveSidecar(r)
 	return nil
 }
@@ -384,6 +388,8 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make([]Track, 0, len(ids))
+	var left []string
+	defer func() { l.tidy(r, left...) }()
 	for _, id := range ids {
 		t, err := l.Track(id)
 		if err != nil {
@@ -397,6 +403,7 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 		dest, err := l.place(r, nt, nt.RelativePath)
 		if err == nil && dest != nt.RelativePath && r.Rename(nt.RelativePath, dest, true) == nil {
 			l.moved(id.String(), nt.RelativePath, dest)
+			left = append(left, path.Dir(nt.RelativePath))
 			nt, _ = l.Track(id)
 		}
 		out = append(out, nt)
@@ -516,7 +523,7 @@ func (l *Library) OrganizeApply(profileID *meta.UUID, planHash string) (moved, u
 	if hash != planHash {
 		return 0, 0, ErrPlanStale
 	}
-	emptied := map[string]bool{}
+	var emptied []string
 	for _, o := range ops {
 		if o.Status == string(meta.OpUnchanged) {
 			unchanged++
@@ -527,17 +534,11 @@ func (l *Library) OrganizeApply(profileID *meta.UUID, planHash string) (moved, u
 			continue
 		}
 		l.moved(o.TrackID.String(), o.From, dest)
-		emptied[path.Dir(o.From)] = true
+		emptied = append(emptied, path.Dir(o.From))
 		moved++
 	}
 	if l.profile(profileID).DeleteEmptyOriginals {
-		for dir := range emptied {
-			for ; dir != "." && dir != "" && !strings.HasPrefix(dir, "."); dir = path.Dir(dir) {
-				if r.Remove(dir, true) != nil {
-					break
-				}
-			}
-		}
+		l.prune(r, emptied, false)
 	}
 	l.saveSidecar(r)
 	return moved, unchanged, nil

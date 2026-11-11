@@ -640,10 +640,12 @@ the second gets ` (1)`, ` (2)` … before the extension, as the Mac does).
 server recomputes the plan and answers `409 planStale` if the hash differs,
 so a library that changed while the user looked at the preview is never
 reorganised against an approval they didn't give. With
-`deleteEmptyOriginals`, folders emptied by the moves are removed, never above
-the library root. Rendered names follow the Mac's rules, with one addition:
-a component longer than 255 bytes is shortened at a grapheme boundary
-(keeping the extension), where the Mac would fail.
+`deleteEmptyOriginals`, folders left with no audio (cover art and other
+leftovers included) are removed after organizing, refiling and deleting, never
+above the library root. A scan removes folders that are completely empty,
+whatever the setting. Rendered names follow the Mac's rules, with one
+addition: a component longer than 255 bytes is shortened at a grapheme
+boundary (keeping the extension), where the Mac would fail.
 
 ---
 

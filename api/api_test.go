@@ -546,3 +546,114 @@ func (srv *Server) libID(name string) string {
 	u, _ := srv.Store.UserByName(name)
 	return u.ID
 }
+
+func exists(parts ...string) bool {
+	_, err := os.Lstat(filepath.Join(parts...))
+	return err == nil
+}
+
+// relocate moves one of alice's tracks on disk and waits for a scan to follow it.
+func (e *env) relocate(from, to string) {
+	os.MkdirAll(filepath.Dir(filepath.Join(e.aRoot, to)), 0o755)
+	if err := os.Rename(filepath.Join(e.aRoot, from), filepath.Join(e.aRoot, to)); err != nil {
+		e.t.Fatal(err)
+	}
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(100 * time.Millisecond) {
+		if _, ok := e.tracks(e.alice)[to]; ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%s never indexed", to)
+		}
+	}
+}
+
+func (e *env) organize() {
+	plan := e.json(e.alice, "POST", "/v2/organizer/plan", map[string]any{}, 200)
+	e.json(e.alice, "POST", "/v2/organizer/apply", map[string]any{"planHash": plan["planHash"]}, 200)
+}
+
+func TestPruneFolders(t *testing.T) {
+	e := setup(t)
+	a := func(p string) string { return filepath.Join(e.aRoot, p) }
+	litter := func(dir string) {
+		os.MkdirAll(a(dir), 0o755)
+		os.WriteFile(a(dir+"/cover.jpg"), []byte("x"), 0o644)
+		os.WriteFile(a(dir+"/.DS_Store"), []byte("x"), 0o644)
+	}
+	e.organize()
+	var paths []string
+	for p := range e.tracks(e.alice) {
+		paths = append(paths, p)
+	}
+	home, linked, dotted := paths[0], paths[1], paths[2]
+	album := filepath.Dir(home)
+
+	// Organize: leftovers go with the folder, up to the first folder with audio.
+	e.relocate(home, album+"/extra/deep/x"+filepath.Ext(home))
+	litter(album + "/extra/deep")
+	e.relocate(linked, "linkhome/in/y"+filepath.Ext(linked))
+	os.Symlink(e.bRoot, a("linkhome/ln"))
+	e.relocate(dotted, "dothome/z"+filepath.Ext(dotted))
+	os.MkdirAll(a("dothome/.stash"), 0o755)
+	e.organize()
+	if exists(a(album+"/extra")) || !exists(a(home)) {
+		t.Fatal("organize left the emptied folders, or removed the album folder")
+	}
+	if exists(a("linkhome/in")) || !exists(a("linkhome/ln")) || !exists(e.bRoot, "tagged.mp3") {
+		t.Fatal("a folder holding a symlink was removed or followed")
+	}
+	if !exists(a("dothome/.stash")) || !exists(a(".flactastic")) {
+		t.Fatal("a dot-folder was removed")
+	}
+
+	// Refile after a tag edit, then delete.
+	id := e.tracks(e.alice)[home]["id"].(string)
+	e.relocate(home, "solo/one/x"+filepath.Ext(home))
+	litter("solo/one")
+	moved := e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"album": "Elsewhere"}, 200)["track"].(map[string]any)
+	now := moved["relativePath"].(string)
+	if exists(a("solo")) || !exists(a(now)) {
+		t.Fatalf("refile to %s left solo/ behind", now)
+	}
+	e.relocate(now, "gone/one/x"+filepath.Ext(home))
+	litter("gone/one")
+	e.json(e.alice, "DELETE", "/v2/tracks/"+id, nil, 204)
+	if exists(a("gone")) || !exists(e.aRoot) {
+		t.Fatal("delete left gone/ behind, or took the root")
+	}
+
+	// With the setting off, only a scan removes folders, and only empty ones.
+	off := meta.DefaultProfile
+	off.DeleteEmptyOriginals = false
+	e.json(e.alice, "PUT", "/v2/organizer", map[string]any{"profiles": []meta.Profile{off}, "selectedID": off.ID}, 204)
+	id = e.tracks(e.alice)[linked]["id"].(string)
+	e.relocate(linked, "kept/one/y"+filepath.Ext(linked))
+	litter("kept/one")
+	e.json(e.alice, "DELETE", "/v2/tracks/"+id, nil, 204)
+	e.relocate(dotted, "kept/two/z"+filepath.Ext(dotted))
+	e.organize()
+	if !exists(a("kept/one/cover.jpg")) || !exists(a("kept/two")) {
+		t.Fatal("folders removed with deleteEmptyOriginals off")
+	}
+
+	old := time.Now().Add(-time.Hour)
+	os.MkdirAll(a("empty/sub"), 0o755)
+	os.WriteFile(a("empty/sub/.DS_Store"), []byte("x"), 0o644)
+	os.MkdirAll(a("scans"), 0o755)
+	os.WriteFile(a("scans/booklet.pdf"), []byte("x"), 0o644)
+	os.MkdirAll(a("fresh"), 0o755)
+	for _, d := range []string{"empty/sub", "empty", "scans"} {
+		os.Chtimes(a(d), old, old)
+	}
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	for deadline := time.Now().Add(time.Minute); exists(a("empty")); time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a scan left an empty folder")
+		}
+	}
+	if !exists(a("scans/booklet.pdf")) || !exists(a("fresh")) || !exists(a("kept/one/cover.jpg")) {
+		t.Fatal("a scan removed a folder that was new or not empty")
+	}
+}
