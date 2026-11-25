@@ -566,6 +566,9 @@ type PlanOp struct {
 	From    string    `json:"from"`
 	To      string    `json:"to"`
 	Status  string    `json:"status"`
+	// Renders is the name the profile gives the track before any number is
+	// added. Tracks that collide share it exactly, so it groups them.
+	Renders string `json:"renders"`
 }
 
 func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
@@ -618,7 +621,7 @@ func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
 		return listed[key(dir)][key(path.Base(p))]
 	}
 	sort.Strings(order)
-	to := make([]string, len(planned))
+	to, renders := make([]string, len(planned)), make([]string, len(planned))
 	numberedGroup := make([]bool, len(planned))
 	assigned := map[string]bool{}
 	for _, k := range order {
@@ -665,7 +668,7 @@ func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
 				name = numbered(n)
 			}
 			assigned[key(name)] = true
-			to[i] = name
+			to[i], renders[i] = name, dest
 			numberedGroup[i] = len(members) > 1 || name != dest
 		}
 	}
@@ -680,7 +683,7 @@ func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
 		case numberedGroup[i]:
 			status = meta.OpConflict
 		}
-		ops[i] = PlanOp{TrackID: o.ID, From: o.Source, To: to[i], Status: string(status)}
+		ops[i] = PlanOp{TrackID: o.ID, From: o.Source, To: to[i], Status: string(status), Renders: renders[i]}
 		lines[i] = o.ID.String() + ":" + ops[i].To
 	}
 	sort.Strings(lines)

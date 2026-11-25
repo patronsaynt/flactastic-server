@@ -643,7 +643,7 @@ automatically. Reorganising files already in the library is explicit:
 
 ```
 POST /v2/organizer/plan   { "profileID": UUID? }
-200 { "planHash": "hex", "operations": [{ "trackID", "from", "to", "status" }] }
+200 { "planHash": "hex", "operations": [{ "trackID", "from", "to", "status", "renders" }] }
 
 POST /v2/organizer/apply  { "profileID": UUID?, "planHash": "hex" }
 200 { "moved": 812, "unchanged": 8300 }
@@ -657,7 +657,12 @@ the lowest existing number, then by track ID. The others get ` (1)`, ` (2)` …
 before the extension, skipping numbers held by files outside the plan. A
 plain name held by such a file is numbered too. `status` is `unchanged` when
 `from` already matches `to`; otherwise it is `conflict` for a track in a
-numbered group and `move` for everything else. A library organized once
+numbered group and `move` for everything else. `renders` is the path before
+any number is added; every track in a collision group carries the identical
+string (whatever its status, including the one already at the plain name),
+so a client finds collisions, and candidate duplicates to compare by
+`contentHash`, by grouping on it. A track whose `renders` no other track
+shares collides with nothing. A library organized once
 plans no moves the next time. `apply` moves each file to exactly `to`, going
 through a temporary name when one move frees the path another needs. It
 fails without overwriting if `to` is taken.

@@ -801,7 +801,30 @@ func TestOrganizerDuplicatesSettle(t *testing.T) {
 	if conflicts != 3 {
 		t.Fatalf("first plan: %d conflicts among the copies", conflicts)
 	}
+	// Every copy carries the same renders, before and after numbering, and
+	// it's the plain name one of them ends up holding.
+	sharedRenders := func(plan map[string]any) (string, map[string]bool) {
+		renders, tos := map[string]bool{}, map[string]bool{}
+		for _, op := range plan["operations"].([]any) {
+			if o := op.(map[string]any); ids[o["trackID"].(string)] {
+				renders[o["renders"].(string)] = true
+				tos[o["to"].(string)] = true
+			}
+		}
+		if len(renders) != 1 || len(tos) != 3 {
+			t.Fatalf("copies: renders %v, to %v", renders, tos)
+		}
+		for r := range renders {
+			return r, tos
+		}
+		return "", nil
+	}
+	before, _ := sharedRenders(plan)
 	e.settles()
+	after, tos := sharedRenders(e.json(e.alice, "POST", "/v2/organizer/plan", map[string]any{}, 200))
+	if before != after || !tos[after] {
+		t.Fatalf("renders %q then %q; settled names %v", before, after, tos)
+	}
 	numbered := 0
 	for p, tr := range e.tracks(e.alice) {
 		if ids[tr["id"].(string)] && (strings.HasSuffix(p, " (1).flac") || strings.HasSuffix(p, " (2).flac")) {
@@ -837,6 +860,15 @@ func TestOrganizerCaseAndNormalizationCollide(t *testing.T) {
 	sort.Strings(tos)
 	if len(tos) != 3 || !strings.HasSuffix(tos[0], " (1).flac") || !strings.HasSuffix(tos[1], " (2).flac") || n["conflict"] < 3 {
 		t.Fatalf("plan %v: %v", n, tos)
+	}
+	renders := map[string]bool{}
+	for _, op := range plan["operations"].([]any) {
+		if o := op.(map[string]any); strings.Contains(strings.ToLower(o["to"].(string)), "caf") {
+			renders[o["renders"].(string)] = true
+		}
+	}
+	if len(renders) != 1 {
+		t.Fatalf("names differing by case and NFC carry different renders: %v", renders)
 	}
 	e.settles()
 }

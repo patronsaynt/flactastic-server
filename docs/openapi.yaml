@@ -1375,12 +1375,18 @@ components:
         deleteEmptyOriginals: { type: boolean }
     PlanOp:
       type: object
-      required: [trackID, from, to, status]
+      required: [trackID, from, to, status, renders]
       properties:
         trackID: { $ref: '#/components/schemas/UUID' }
         from: { type: string }
-        to: { type: string }
+        to: { type: string, description: 'Final path, numbering included.' }
         status: { type: string, enum: [move, unchanged, conflict] }
+        renders:
+          type: string
+          description: >-
+            The path the profile renders before any number is added. Every track in a collision group
+            (any status, including the one already at the plain name) carries the identical string, so
+            clients group collisions by it. Since beta-1.5.2.
 
     Playlist:
       type: object
