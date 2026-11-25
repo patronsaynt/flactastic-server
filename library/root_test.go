@@ -2,6 +2,7 @@ package library
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,7 +110,7 @@ func TestProbeFS(t *testing.T) {
 	}
 	for _, l := range lines {
 		t.Log(l)
-		if !strings.HasPrefix(l, "ok") && !strings.Contains(l, "xattr") { // tmpfs may lack user xattrs
+		if !strings.HasPrefix(l, "ok") && !strings.HasPrefix(l, "info") && !strings.Contains(l, "xattr") { // tmpfs may lack user xattrs
 			t.Errorf("on a local disk: %s", l)
 		}
 	}
@@ -117,5 +118,52 @@ func TestProbeFS(t *testing.T) {
 	incoming, _ := os.ReadDir(filepath.Join(dir, ".flactastic/incoming"))
 	if len(left)+len(incoming) != 0 {
 		t.Errorf("left behind: %v %v", left, incoming)
+	}
+}
+
+func TestReplace(t *testing.T) {
+	for _, network := range []bool{false, true} {
+		dir := t.TempDir()
+		r, err := openRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.network = network
+		os.MkdirAll(filepath.Join(dir, "al"), 0o755)
+		write := func(n, v string) { os.WriteFile(filepath.Join(dir, n), []byte(v), 0o644) }
+		read := func(n string) string { b, _ := os.ReadFile(filepath.Join(dir, n)); return string(b) }
+		write("al/t.flac", "old")
+		write("al/.new", "new")
+		open, _ := os.Open(filepath.Join(dir, "al/t.flac")) // a stream holding the original
+		if err := r.Replace("al/.new", "al/t.flac"); err != nil {
+			t.Fatalf("network=%v: %v", network, err)
+		}
+		if b, _ := io.ReadAll(open); string(b) != "old" {
+			t.Errorf("network=%v: the open reader saw %q", network, b)
+		}
+		open.Close()
+		if got := read("al/t.flac"); got != "new" {
+			t.Errorf("network=%v: t.flac holds %q", network, got)
+		}
+		if left, _ := os.ReadDir(filepath.Join(dir, "al")); len(left) != 1 {
+			t.Errorf("network=%v: left behind %v", network, left)
+		}
+		// Nothing to replace: the new file just moves in.
+		write("al/.new2", "fresh")
+		if err := r.Replace("al/.new2", "al/u.flac"); err != nil || read("al/u.flac") != "fresh" {
+			t.Errorf("network=%v: into a free name: %v", network, err)
+		}
+		// The new file can't move in: the original must come back.
+		if network {
+			if err := r.Replace("al/missing", "al/t.flac"); err == nil {
+				t.Error("replace from a missing file succeeded")
+			}
+			if read("al/t.flac") != "new" {
+				t.Error("the original wasn't put back")
+			}
+			if left, _ := os.ReadDir(filepath.Join(dir, "al")); len(left) != 2 {
+				t.Errorf("left behind %v", left)
+			}
+		}
 	}
 }

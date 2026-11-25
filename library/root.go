@@ -2,12 +2,15 @@ package library
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"flactastic/server/meta"
 )
 
 // Root confines every filesystem operation to one directory. Each path is
@@ -16,8 +19,9 @@ import (
 // library. (openat2's RESOLVE_BENEATH would do the same, but systemd's
 // RestrictSUIDSGID= and many container runtimes refuse openat2 outright.)
 type Root struct {
-	fd   int
-	Path string
+	fd      int
+	Path    string
+	network bool // SMB, NFS and the like: see Replace
 }
 
 func openRoot(dir string) (*Root, error) {
@@ -26,6 +30,8 @@ func openRoot(dir string) (*Root, error) {
 		return nil, err
 	}
 	r := &Root{fd: fd, Path: dir}
+	var st unix.Statfs_t
+	r.network = unix.Fstatfs(fd, &st) == nil && networkFS[int64(st.Type)]
 	runtime.SetFinalizer(r, func(r *Root) { unix.Close(r.fd) })
 	return r, nil
 }
@@ -133,6 +139,33 @@ func (r *Root) Rename(from, to string, noReplace bool) error {
 		return unix.Renameat(fd1, b1, fd2, b2)
 	}
 	return err
+}
+
+// Replace puts from in place of to, which may exist. On a local disk that is
+// one atomic rename. A network filesystem may refuse to replace a file that
+// is open (a stream, the hasher, another computer), and SMB then deletes the
+// target anyway; so there the original is moved aside first, which open
+// files allow, and deleted once the new file is in place. Readers keep the
+// old bytes until they close.
+func (r *Root) Replace(from, to string) error {
+	if !r.network {
+		return r.Rename(from, to, false)
+	}
+	aside := path.Join(path.Dir(to), ".flactastic-old-"+meta.NewUUID().String()+path.Ext(to))
+	if err := r.Rename(to, aside, true); err != nil {
+		if errors.Is(err, unix.ENOENT) && !r.Exists(to) {
+			return r.Rename(from, to, true) // nothing to replace
+		}
+		return err
+	}
+	if err := r.Rename(from, to, true); err != nil {
+		if back := r.Rename(aside, to, true); back != nil {
+			return fmt.Errorf("%w; and the original is left at %s: %v", err, aside, back)
+		}
+		return err
+	}
+	r.Remove(aside, false)
+	return nil
 }
 
 // renameat2 is unix.Renameat2; tests stand in a filesystem without flags.

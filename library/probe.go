@@ -33,6 +33,7 @@ func ProbeFS(root, folder string) ([]string, error) {
 		out = append(out, fmt.Sprintf("FAIL  %s: %v", step, err))
 		return false
 	}
+	out = append(out, fmt.Sprintf("info  network filesystem (replaces files the safe way): %v", r.network))
 	id := meta.NewUUID().String()[:8]
 	in := incomingDir + "probe-" + id + ".m4a"
 	if folder == "" || folder == "." {
@@ -98,11 +99,35 @@ func ProbeFS(root, folder string) ([]string, error) {
 		}
 	}
 	if r.Exists(a) {
-		h, _ := r.Open(b, unix.O_RDONLY, 0) // a replace while the target is open, as an edit's is
-		report("rename over an open file (plain renameat)", rename(a, b, 0))
+		h, _ := r.Open(b, unix.O_RDONLY, 0) // a replace while the target is open, as a stream holds it
+		err := rename(a, b, 0)
+		if err != nil && !r.Exists(b) {
+			err = fmt.Errorf("%w, AND THE TARGET IS GONE: replacing an open file destroys it here", err)
+		}
+		report("rename over an open file (plain renameat)", err)
 		if h != nil {
 			h.Close()
 		}
+	}
+	// What the server does instead on a network filesystem.
+	for _, p := range []string{a, b} {
+		if !r.Exists(p) {
+			if g, err := r.Create(p); err == nil {
+				g.Close()
+			}
+		}
+	}
+	h, _ := r.Open(b, unix.O_RDONLY, 0)
+	network := r.network
+	r.network = true
+	err = r.Replace(a, b)
+	r.network = network
+	if err == nil && (!r.Exists(b) || r.Exists(a)) {
+		err = errors.New("reported success, but the files aren't where they should be")
+	}
+	report("replace an open file the server's way (move aside, move in, delete)", err)
+	if h != nil {
+		h.Close()
 	}
 	fd1, b1, err1 := r.dir(b, false)
 	fd2, b2, err2 := r.dir(c, false)

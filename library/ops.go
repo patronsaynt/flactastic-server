@@ -331,7 +331,11 @@ func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	if old != "" && old != dest {
 		l.trash(r, id, old)
 	}
-	if err := r.Rename(part, dest, old != dest); err != nil {
+	place := func() error { return r.Rename(part, dest, true) }
+	if old == dest {
+		place = func() error { return r.Replace(part, dest) }
+	}
+	if err := place(); err != nil {
 		return nil, err
 	}
 	if old != "" && old != dest {
@@ -536,7 +540,7 @@ func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) (e
 		return step("close", err)
 	}
 	src.Close()
-	if err := r.Rename(tmp, t.RelativePath, false); err != nil {
+	if err := r.Replace(tmp, t.RelativePath); err != nil {
 		return step("replace original", err)
 	}
 	ok = true

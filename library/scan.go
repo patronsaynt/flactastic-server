@@ -466,7 +466,7 @@ func (l *Library) saveSidecar(r *Root) {
 	}
 	_, err = f.Write(data)
 	f.Close()
-	if err == nil && r.Rename(tmp, sidecarRel, false) == nil {
+	if err == nil && r.Replace(tmp, sidecarRel) == nil {
 		l.sidecarDirty = false
 	} else {
 		r.Remove(tmp, false)

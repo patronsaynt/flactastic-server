@@ -3,6 +3,7 @@ package library
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,4 +170,35 @@ func TestEditChecksEveryTrackFirst(t *testing.T) {
 	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "create temporary copy") {
 		t.Fatalf("unwritable folder: %v, want the failing step, not not-found", err)
 	}
+}
+
+// On a network mount an edit must not replace the file while a stream has
+// it open: SMB deletes the original when that fails.
+func TestEditOnNetworkMountWhileStreaming(t *testing.T) {
+	l, r := testLibrary(t, "al/a.flac")
+	r.network = true
+	a := idAt(l, "al/a.flac")
+	before, _ := os.ReadFile(filepath.Join(r.Path, "al/a.flac"))
+	stream, err := os.Open(filepath.Join(r.Path, "al/a.flac"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	out, err := l.Edit([]meta.UUID{a}, genre("Bass"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[0].Genre == nil || *out[0].Genre != "Bass" {
+		t.Fatalf("genre not written: %v", out[0].Genre)
+	}
+	if b, _ := io.ReadAll(stream); !bytes.Equal(b, before) {
+		t.Error("the stream didn't keep the old bytes")
+	}
+	entries, _ := os.ReadDir(filepath.Join(r.Path, filepath.Dir(out[0].RelativePath)))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".flactastic-") {
+			t.Errorf("left behind: %s", e.Name())
+		}
+	}
+	checkInSync(t, l, r)
 }
