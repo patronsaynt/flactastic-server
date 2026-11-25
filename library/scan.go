@@ -217,8 +217,21 @@ func (l *Library) scan(watch int) {
 			f.Close()
 			continue
 		}
+		// Forget only on a second look: a move still settling, or a network
+		// mount's passing glitch, must not delete the track.
+		if !l.missing[rel] {
+			l.missing[rel] = true
+			pending = true
+			continue
+		}
+		delete(l.missing, rel)
 		l.forget(t.id, rel)
 		rep.Removed++
+	}
+	for rel := range l.missing {
+		if seen[rel] || known[rel].id == "" {
+			delete(l.missing, rel)
+		}
 	}
 	if wanted {
 		l.db.QueryRow("SELECT COUNT(*) FROM tracks WHERE path IS NOT NULL").Scan(&rep.Tracks)

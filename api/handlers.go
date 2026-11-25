@@ -45,11 +45,11 @@ var deviceKinds = []string{"mac", "iPhone", "iPad", "windows", "linux", "other"}
 func (srv *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Username, Password, DeviceName, DeviceKind string }
 	if err := decode(w, r, jsonLimit, &in); err != nil {
-		fail(w, err)
+		fail(w, r, err)
 		return
 	}
 	if in.DeviceName == "" || len(in.DeviceName) > 63 || !utf8.ValidString(in.DeviceName) || !slices.Contains(deviceKinds, in.DeviceKind) {
-		fail(w, errBadRequest)
+		fail(w, r, errBadRequest)
 		return
 	}
 	if !store.NamePattern.MatchString(in.Username) {
@@ -57,19 +57,19 @@ func (srv *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ipKey, userKey := "ip:"+clientIP(r), "user:"+in.Username
 	if d := srv.failures.wait(ipKey, userKey); d > 0 {
-		retry(w, d)
+		retry(w, r, d)
 		return
 	}
 	user, good := srv.Store.Authenticate(in.Username, in.Password)
 	if !good {
 		srv.failures.fail(ipKey, userKey)
-		fail(w, errCredentials)
+		fail(w, r, errCredentials)
 		return
 	}
 	srv.failures.clear(userKey)
 	d, token, err := srv.Store.AddDevice(user.ID, in.DeviceName, in.DeviceKind)
 	if err != nil {
-		fail(w, err)
+		fail(w, r, err)
 		return
 	}
 	ok(w, map[string]any{"token": token, "device": deviceOut(d, d.ID), "user": userOut(user)})
@@ -93,7 +93,7 @@ func (srv *Server) password(w http.ResponseWriter, r *http.Request, s session) e
 	}
 	key := "user:" + s.user.Name
 	if d := srv.failures.wait(key); d > 0 {
-		retry(w, d)
+		retry(w, r, d)
 		return nil
 	}
 	if _, good := srv.Store.Authenticate(s.user.Name, in.Current); !good {

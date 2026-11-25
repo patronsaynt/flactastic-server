@@ -99,7 +99,7 @@ func (srv *Server) Handler() http.Handler {
 	auth("GET /v2/history", srv.history)
 	auth("GET /v2/stats", srv.stats)
 	auth("GET /v2/admin/status", srv.adminStatus)
-	open("/", func(w http.ResponseWriter, r *http.Request) { fail(w, errNotFound) })
+	open("/", func(w http.ResponseWriter, r *http.Request) { fail(w, r, errNotFound) })
 	return headers(mux)
 }
 
@@ -141,7 +141,9 @@ var (
 	errInternal    = newErr(500, "internalFailure")
 )
 
-func fail(w http.ResponseWriter, err error) {
+// fail answers err as its API error and logs it with its cause, which the
+// answer's code alone doesn't carry.
+func fail(w http.ResponseWriter, r *http.Request, err error) {
 	var e *apiError
 	var tooBig *http.MaxBytesError
 	switch {
@@ -168,9 +170,14 @@ func fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, library.ErrPlanStale):
 		e = errPlanStale
 	default:
-		slog.Error("request failed", "err", err)
 		e = errInternal
 	}
+	level := slog.LevelWarn
+	if e.status >= 500 {
+		level = slog.LevelError
+	}
+	slog.Log(r.Context(), level, "request failed", "method", r.Method, "path", r.URL.Path,
+		"status", e.status, "code", e.code, "err", err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.status)
 	json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": e.code, "message": e.code}})
@@ -282,7 +289,7 @@ func clientIP(r *http.Request) string {
 func (srv *Server) authed(w http.ResponseWriter, r *http.Request, h handler) {
 	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !found || token == "" {
-		fail(w, errAuth)
+		fail(w, r, errAuth)
 		return
 	}
 	// A valid token is never throttled: it can't be guessed, and a stale device
@@ -290,25 +297,25 @@ func (srv *Server) authed(w http.ResponseWriter, r *http.Request, h handler) {
 	device, user, err := srv.Store.DeviceForToken(token)
 	if err != nil {
 		if d := srv.failures.wait("ip:" + clientIP(r)); d > 0 {
-			retry(w, d)
+			retry(w, r, d)
 			return
 		}
 		srv.failures.fail("ip:" + clientIP(r))
-		fail(w, errAuth)
+		fail(w, r, errAuth)
 		return
 	}
 	srv.Store.Touch(device)
 	lib := srv.Libs.Get(user.ID)
 	if lib == nil {
-		fail(w, errOffline)
+		fail(w, r, errOffline)
 		return
 	}
 	if err := h(w, r, session{user: user, device: device, lib: lib}); err != nil {
-		fail(w, err)
+		fail(w, r, err)
 	}
 }
 
-func retry(w http.ResponseWriter, d time.Duration) {
+func retry(w http.ResponseWriter, r *http.Request, d time.Duration) {
 	w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
-	fail(w, errRateLimited)
+	fail(w, r, errRateLimited)
 }

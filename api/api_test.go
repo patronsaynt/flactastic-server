@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -750,6 +752,7 @@ func (e *env) planCounts() (map[string]any, map[string]int) {
 
 // addCopy puts a copy of a test file into alice's library and waits for it.
 func (e *env) addCopy(src, rel string) string {
+	os.MkdirAll(filepath.Dir(filepath.Join(e.aRoot, rel)), 0o755)
 	copyFile(e.t, "../testdata/audio/"+src, filepath.Join(e.aRoot, rel))
 	e.server.Libs.Get(e.server.libID("alice")).Scan()
 	for deadline := time.Now().Add(time.Minute); ; time.Sleep(100 * time.Millisecond) {
@@ -942,5 +945,54 @@ func TestOrganizerSwapsThroughTemporaryNames(t *testing.T) {
 		if strings.Contains(en.Name(), "(organizing ") {
 			t.Fatalf("temporary name left behind: %s", en.Name())
 		}
+	}
+}
+
+// syncBuffer collects log output written from the server's goroutines.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// An edit that fails inside the server is a 500 naming its step in the log,
+// not "not found"; a track whose file is gone is still not found.
+func TestEditFailuresAreReportedAndLogged(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only folder")
+	}
+	e := setup(t)
+	var logs syncBuffer
+	defer func(old *slog.Logger) { slog.SetDefault(old) }(slog.Default())
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+
+	id := e.addCopy("cur-single.flac", "ro/x.flac")
+	dir := filepath.Join(e.aRoot, "ro")
+	os.Chmod(dir, 0o555)
+	defer os.Chmod(dir, 0o755)
+	res := e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"lyrics": "la"}, 500)
+	if errCode(res) != "internalFailure" {
+		t.Fatalf("read-only folder: %v", res)
+	}
+	if l := logs.String(); !strings.Contains(l, "create temporary copy") || !strings.Contains(l, "permission denied") {
+		t.Fatalf("log doesn't name the step and errno:\n%s", l)
+	}
+	os.Chmod(dir, 0o755)
+
+	os.Remove(filepath.Join(dir, "x.flac"))
+	e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"lyrics": "la"}, 404)
+	if l := logs.String(); !strings.Contains(l, "status=404") || !strings.Contains(l, "no such file") {
+		t.Fatalf("404 not logged with its cause:\n%s", l)
 	}
 }

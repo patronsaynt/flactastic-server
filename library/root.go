@@ -119,12 +119,24 @@ func (r *Root) Rename(from, to string, noReplace bool) error {
 		return err
 	}
 	defer unix.Close(fd2)
-	var flags uint
-	if noReplace {
-		flags = unix.RENAME_NOREPLACE
+	if !noReplace {
+		return unix.Renameat(fd1, b1, fd2, b2)
 	}
-	return unix.Renameat2(fd1, b1, fd2, b2, flags)
+	err = renameat2(fd1, b1, fd2, b2, unix.RENAME_NOREPLACE)
+	if err == unix.EINVAL || err == unix.ENOSYS || err == unix.EOPNOTSUPP {
+		// Many network and FUSE filesystems can't refuse to replace: check
+		// first, then rename plainly.
+		var st unix.Stat_t
+		if unix.Fstatat(fd2, b2, &st, unix.AT_SYMLINK_NOFOLLOW) == nil {
+			return unix.EEXIST
+		}
+		return unix.Renameat(fd1, b1, fd2, b2)
+	}
+	return err
 }
+
+// renameat2 is unix.Renameat2; tests stand in a filesystem without flags.
+var renameat2 = unix.Renameat2
 
 func (r *Root) Remove(rel string, isDir bool) error {
 	fd, base, err := r.dir(rel, false)

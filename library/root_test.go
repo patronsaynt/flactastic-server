@@ -73,3 +73,49 @@ func TestFitComponents(t *testing.T) {
 		t.Fatalf("extension lost: %s", got)
 	}
 }
+
+// Network and FUSE filesystems often reject renameat2's flags.
+func TestRenameWithoutRenameat2Flags(t *testing.T) {
+	defer func(f func(int, string, int, string, uint) error) { renameat2 = f }(renameat2)
+	renameat2 = func(int, string, int, string, uint) error { return unix.EINVAL }
+	dir := t.TempDir()
+	for _, n := range []string{"a.flac", "b.flac"} {
+		os.WriteFile(filepath.Join(dir, n), []byte(n), 0o644)
+	}
+	r, err := openRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Rename("a.flac", "b.flac", true); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("noReplace onto an existing file: %v", err)
+	}
+	if err := r.Rename("a.flac", "sub/c.flac", true); err != nil {
+		t.Fatalf("noReplace onto a free name: %v", err)
+	}
+	if err := r.Rename("sub/c.flac", "b.flac", false); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "b.flac")); string(b) != "a.flac" {
+		t.Fatalf("b.flac holds %q", b)
+	}
+}
+
+func TestProbeFS(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "Artist/Album"), 0o755)
+	lines, err := ProbeFS(dir, "Artist/Album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lines {
+		t.Log(l)
+		if !strings.HasPrefix(l, "ok") && !strings.Contains(l, "xattr") { // tmpfs may lack user xattrs
+			t.Errorf("on a local disk: %s", l)
+		}
+	}
+	left, _ := os.ReadDir(filepath.Join(dir, "Artist/Album"))
+	incoming, _ := os.ReadDir(filepath.Join(dir, ".flactastic/incoming"))
+	if len(left)+len(incoming) != 0 {
+		t.Errorf("left behind: %v %v", left, incoming)
+	}
+}

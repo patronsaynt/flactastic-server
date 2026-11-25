@@ -581,9 +581,17 @@ is written as the plural tag plus a display string joined with the user's
 
 The edit is made on a copy of the file which then replaces the original
 atomically, so a stream in progress keeps reading the old bytes. The track is
-then refiled through the user's default Organizer profile, which may change
-its `relativePath`. The response is `200 { "track": Track }` (or
+then refiled through the user's selected Organizer profile, which may change
+its `relativePath`; the refile never takes a path held by another file or
+track. The response is `200 { "track": Track }` (or
 `{ "tracks": [Track] }`).
+
+Every track is checked before any is written. `404 notFound` means a track
+ID is unknown or a track's own file is missing (the server rescans), and
+nothing was written. Any other failure is `500 internalFailure`, with the
+failing step in the server's log; when the file at a track's path belongs to
+another track, the index is behind the disk and the server rescans, so a
+retry after the scan succeeds.
 
 ```
 DELETE /v2/tracks/{id}         → 204

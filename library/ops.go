@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path"
@@ -120,15 +121,28 @@ func fitComponents(rel string) string {
 	return strings.Join(parts, "/")
 }
 
-// place is where the default profile files t, made unique on disk. A path
-// held by t itself counts as free.
+// place is where the selected profile files t, made unique. A path held by
+// t itself counts as free; one taken on disk, or given to another track by
+// the index even if its file is gone, does not.
 func (l *Library) place(r *Root, t Track, self string) (string, error) {
 	ops := meta.PlanOrganize([]meta.OrganizerTrack{t.organizerTrack()}, l.profile(nil), l.resolver())
 	if ops[0].Status == meta.OpUnchanged {
 		return t.RelativePath, nil
 	}
-	dest := meta.UniqueName(fitComponents(ops[0].Destination), func(p string) bool { return p != self && r.Exists(p) })
+	dest := meta.UniqueName(fitComponents(ops[0].Destination), l.taken(r, self, t.ID))
 	return meta.SanitizeAudioRelativePath(dest)
+}
+
+// taken reports a path as unavailable to track id, which already holds self.
+func (l *Library) taken(r *Root, self string, id meta.UUID) func(string) bool {
+	return func(p string) bool {
+		if p == self {
+			return false
+		}
+		var other string
+		held := l.db.QueryRow("SELECT id FROM tracks WHERE path = ? AND id != ?", p, id.String()).Scan(&other) == nil
+		return held || r.Exists(p)
+	}
 }
 
 // Uploads
@@ -309,7 +323,7 @@ func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 		return nil, err
 	}
 	if old == "" && dest == t.RelativePath {
-		dest = meta.UniqueName(dest, r.Exists)
+		dest = meta.UniqueName(dest, l.taken(r, "", t.ID))
 	}
 	if err := l.tagID(r, part, id); err != nil {
 		return nil, err
@@ -395,7 +409,9 @@ func (l *Library) Delete(id meta.UUID) error {
 }
 
 // Edit writes tags to each track on a copy that then atomically replaces
-// the original, and refiles the track through the default profile.
+// the original, and refiles the track through the selected profile. Every
+// track is checked before any is written, so a request that names a missing
+// track changes nothing.
 func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Track, error) {
 	r, err := l.Root()
 	if err != nil {
@@ -403,24 +419,37 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	tracks := make([]Track, len(ids))
+	for i, id := range ids {
+		if tracks[i], err = l.Track(id); err != nil {
+			return nil, ErrNotFound
+		}
+		if err := l.checkFile(r, tracks[i]); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]Track, 0, len(ids))
 	var left []string
 	defer func() { l.tidy(r, left...) }()
-	for _, id := range ids {
-		t, err := l.Track(id)
-		if err != nil {
-			return out, ErrNotFound
-		}
+	for i, t := range tracks {
 		if err := l.editFile(r, t, e, separator); err != nil {
-			return out, err
+			return out, fmt.Errorf("edited %d of %d tracks: %w", i, len(tracks), err)
 		}
 		l.index(r, t.RelativePath)
-		nt, _ := l.Track(id)
-		dest, err := l.place(r, nt, nt.RelativePath)
-		if err == nil && dest != nt.RelativePath && r.Rename(nt.RelativePath, dest, true) == nil {
-			l.moved(id.String(), nt.RelativePath, dest)
-			left = append(left, path.Dir(nt.RelativePath))
-			nt, _ = l.Track(id)
+		nt, _ := l.Track(t.ID)
+		if dest, err := l.place(r, nt, nt.RelativePath); err == nil && dest != nt.RelativePath {
+			if err := r.Rename(nt.RelativePath, dest, true); err != nil {
+				slog.Warn("edit: track left in place", "user", l.User.Name, "from", nt.RelativePath, "to", dest, "err", err)
+			} else if err := l.moved(t.ID.String(), nt.RelativePath, dest); err != nil {
+				// The index can't follow: put the file back rather than lose it.
+				slog.Error("edit: refile undone", "user", l.User.Name, "from", nt.RelativePath, "to", dest, "err", err)
+				r.Rename(dest, nt.RelativePath, true)
+				l.sidecar[nt.RelativePath] = t.ID.String()
+				delete(l.sidecar, dest)
+			} else {
+				left = append(left, path.Dir(nt.RelativePath))
+				nt, _ = l.Track(t.ID)
+			}
 		}
 		out = append(out, nt)
 	}
@@ -428,50 +457,87 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 	return out, nil
 }
 
-func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) error {
+// checkFile makes sure t's own file is at its indexed path. Missing is
+// ErrNotFound; a file carrying another track's ID means the index is behind
+// the disk, so a scan is started and the edit refused.
+func (l *Library) checkFile(r *Root, t Track) error {
+	f, err := r.Open(t.RelativePath, unix.O_RDONLY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		l.Scan()
+		return fmt.Errorf("%w: %s: %v", ErrNotFound, t.RelativePath, err)
+	}
+	if err != nil {
+		return fmt.Errorf("open %s: %v", t.RelativePath, err)
+	}
+	defer f.Close()
+	buf := make([]byte, 64)
+	if n, err := unix.Fgetxattr(int(f.Fd()), xattrName, buf); err == nil {
+		if other := string(buf[:n]); !strings.EqualFold(other, t.ID.String()) {
+			l.Scan()
+			return fmt.Errorf("%s holds track %s, not %s: the index is behind the disk; rescanning", t.RelativePath, other, t.ID)
+		}
+	}
+	return nil
+}
+
+// editFile rewrites t's tags on a copy beside the original, then renames the
+// copy over it. The copy stays in the same folder, which every filesystem
+// can rename within atomically. Errors name the failing step and never pass
+// on ENOENT, which would read as a missing track.
+func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) (err error) {
+	step := func(s string, err error) error { return fmt.Errorf("edit %s: %s: %v", t.RelativePath, s, err) }
 	src, err := r.Open(t.RelativePath, unix.O_RDONLY, 0)
 	if err != nil {
-		return err
+		return step("open", err)
 	}
 	defer src.Close()
-	tmp := incomingDir + meta.NewUUID().String() + ".edit"
+	ext := path.Ext(t.RelativePath)
+	tmp := path.Join(path.Dir(t.RelativePath), ".flactastic-edit-"+meta.NewUUID().String()+ext)
 	dst, err := r.Create(tmp)
 	if err != nil {
-		return err
+		return step("create temporary copy", err)
 	}
-	ok := false
+	closed, ok := false, false
 	defer func() {
-		dst.Close()
+		if !closed {
+			dst.Close()
+		}
 		if !ok {
 			r.Remove(tmp, false)
 		}
 	}()
 	if _, err := io.Copy(dst, src); err != nil {
-		return err
+		return step("copy", err)
 	}
 	if info, err := src.Stat(); err == nil {
 		dst.Chmod(info.Mode().Perm())
 	}
-	unix.Fsetxattr(int(dst.Fd()), xattrName, []byte(t.ID.String()), 0)
+	unix.Fsetxattr(int(dst.Fd()), xattrName, []byte(t.ID.String()), 0) // optional: the sidecar also holds it
 	dup, err := unix.Dup(int(dst.Fd()))
 	if err != nil {
-		return err
+		return step("dup", err)
 	}
-	tf, err := taglib.Open(dup, strings.TrimPrefix(path.Ext(t.RelativePath), "."), true)
+	tf, err := taglib.Open(dup, strings.TrimPrefix(ext, "."), true)
 	if err != nil {
-		return err
+		return step("read tags", err)
 	}
 	tf.Apply(e, tf.Read(), t.Format == meta.FLAC, separator)
 	err = tf.Save()
 	tf.Close()
 	if err != nil {
-		return err
+		return step("write tags", err)
 	}
 	if err := dst.Sync(); err != nil {
-		return err
+		return step("sync", err)
 	}
+	// Some network filesystems won't rename or replace a file that is open.
+	closed = true
+	if err := dst.Close(); err != nil {
+		return step("close", err)
+	}
+	src.Close()
 	if err := r.Rename(tmp, t.RelativePath, false); err != nil {
-		return err
+		return step("replace original", err)
 	}
 	ok = true
 	return nil

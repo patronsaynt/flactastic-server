@@ -49,6 +49,8 @@ type Library struct {
 	sidecar      map[string]string // relative path → trackID, the Mac's track-ids.json
 	sidecarDirty bool
 
+	missing map[string]bool // indexed paths the last scan couldn't find
+
 	albumsMu  sync.Mutex
 	albums    []Album // Albums' last result, as of tracks change albumsSeq
 	albumsSeq int64
@@ -98,7 +100,7 @@ func Open(u store.User, dataDir string) (*Library, error) {
 		return nil, err
 	}
 	l := &Library{User: u, Dir: dir, db: db, wake: make(chan struct{}, 1), hashing: make(chan struct{}, 1),
-		changed: make(chan struct{})}
+		changed: make(chan struct{}), missing: map[string]bool{}}
 	l.state.Store(StateScanning)
 	if err := l.fillSearch(); err != nil {
 		db.Close()

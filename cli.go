@@ -43,12 +43,16 @@ Usage:
   flactastic-server scan [NAME]
   flactastic-server rebuild [NAME]
   flactastic-server backup DIR
+  flactastic-server fsprobe DIR [FOLDER]
   flactastic-server version
 
 Every command takes --data DIR (default /var/lib/flactastic-server).
 session shows active streams, live on a terminal; session log shows finished ones.
 SIZE is bytes or a number with K, M, G or T. Removing a user never touches their music.
 start, stop and restart control the flactastic-server systemd service.
+fsprobe tests the filesystem calls the server relies on, in DIR (a music
+folder) and FOLDER beneath it, and cleans up. Run it as the service user:
+  sudo -u flactastic flactastic-server fsprobe /srv/music "Some Artist/Some Album"
 library shows a user's library as the apps do; --artist and --album match
 part of a name, ignoring case and accents. Sort keys:
   tracks     album (default), title, artist, year, added, duration, size, format, path
@@ -121,6 +125,15 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
+	case "fsprobe":
+		if len(o.args) < 2 || len(o.args) > 3 {
+			return errors.New("usage: flactastic-server fsprobe DIR [FOLDER]")
+		}
+		lines, err := library.ProbeFS(o.args[1], strings.Join(o.args[2:], ""))
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+		return err
 	case "start", "stop", "restart":
 		if len(o.args) > 1 {
 			return fmt.Errorf("unknown command %q; see --help", strings.Join(o.args, " "))
