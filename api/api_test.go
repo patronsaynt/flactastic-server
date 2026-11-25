@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -734,4 +736,211 @@ func (e *env) tracksOf(token string) string {
 		return tr["id"].(string)
 	}
 	return ""
+}
+
+// planCounts plans alice's library and counts ops by status.
+func (e *env) planCounts() (map[string]any, map[string]int) {
+	plan := e.json(e.alice, "POST", "/v2/organizer/plan", map[string]any{}, 200)
+	n := map[string]int{}
+	for _, op := range plan["operations"].([]any) {
+		n[op.(map[string]any)["status"].(string)]++
+	}
+	return plan, n
+}
+
+// addCopy puts a copy of a test file into alice's library and waits for it.
+func (e *env) addCopy(src, rel string) string {
+	copyFile(e.t, "../testdata/audio/"+src, filepath.Join(e.aRoot, rel))
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(100 * time.Millisecond) {
+		if t, ok := e.tracks(e.alice)[rel]; ok {
+			return t["id"].(string)
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%s never indexed", rel)
+		}
+	}
+}
+
+// settles applies the organizer and checks the next two runs change nothing.
+func (e *env) settles() {
+	e.t.Helper()
+	e.organize()
+	var hash any
+	for run := 2; run <= 3; run++ {
+		plan, n := e.planCounts()
+		if n["move"] != 0 || n["conflict"] != 0 {
+			e.t.Fatalf("run %d plans %v", run, n)
+		}
+		res := e.json(e.alice, "POST", "/v2/organizer/apply", map[string]any{"planHash": plan["planHash"]}, 200)
+		if res["moved"].(float64) != 0 {
+			e.t.Fatalf("run %d moved %v", run, res["moved"])
+		}
+		if hash != nil && plan["planHash"] != hash {
+			e.t.Fatalf("run %d plan hash changed", run)
+		}
+		hash = plan["planHash"]
+	}
+}
+
+func TestOrganizerDuplicatesSettle(t *testing.T) {
+	e := setup(t)
+	ids := map[string]bool{e.tracks(e.alice)["cur-single.flac"]["id"].(string): true}
+	ids[e.addCopy("cur-single.flac", "copy-a.flac")] = true
+	ids[e.addCopy("cur-single.flac", "copy-b.flac")] = true
+	plan, _ := e.planCounts()
+	conflicts := 0
+	for _, op := range plan["operations"].([]any) {
+		if o := op.(map[string]any); o["status"] == "conflict" && ids[o["trackID"].(string)] {
+			conflicts++
+		}
+	}
+	if conflicts != 3 {
+		t.Fatalf("first plan: %d conflicts among the copies", conflicts)
+	}
+	e.settles()
+	numbered := 0
+	for p, tr := range e.tracks(e.alice) {
+		if ids[tr["id"].(string)] && (strings.HasSuffix(p, " (1).flac") || strings.HasSuffix(p, " (2).flac")) {
+			numbered++
+		}
+	}
+	if numbered != 2 {
+		t.Fatalf("%d numbered copies", numbered)
+	}
+	// The moves alone don't make the next scan re-read or re-hash anything.
+	seq := e.get(e.alice, "/v2/library", 200)["seq"].(float64)
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	time.Sleep(3 * time.Second)
+	e.waitReady(e.alice)
+	if feed := e.get(e.alice, fmt.Sprintf("/v2/tracks?since=%d", int(seq)), 200); len(feed["tracks"].([]any)) != 0 {
+		t.Fatalf("rescan after organizing touched %d tracks", len(feed["tracks"].([]any)))
+	}
+}
+
+func TestOrganizerCaseAndNormalizationCollide(t *testing.T) {
+	e := setup(t)
+	for i, title := range []string{"Café", "CAFÉ", "Café"} {
+		id := e.addCopy("cur-single.flac", fmt.Sprintf("copy-%d.flac", i))
+		e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"title": title}, 200)
+	}
+	plan, n := e.planCounts()
+	var tos []string
+	for _, op := range plan["operations"].([]any) {
+		if to := op.(map[string]any)["to"].(string); strings.Contains(strings.ToLower(to), "caf") {
+			tos = append(tos, to)
+		}
+	}
+	sort.Strings(tos)
+	if len(tos) != 3 || !strings.HasSuffix(tos[0], " (1).flac") || !strings.HasSuffix(tos[1], " (2).flac") || n["conflict"] < 3 {
+		t.Fatalf("plan %v: %v", n, tos)
+	}
+	e.settles()
+}
+
+func TestOrganizerOutsideFileBlocksOnce(t *testing.T) {
+	e := setup(t)
+	plan, _ := e.planCounts()
+	var to string
+	for _, op := range plan["operations"].([]any) {
+		if o := op.(map[string]any); o["from"] == "cur-single.flac" {
+			to = o["to"].(string)
+		}
+	}
+	// A file the library doesn't track sits at the planned name.
+	os.MkdirAll(filepath.Dir(filepath.Join(e.aRoot, to)), 0o755)
+	os.WriteFile(filepath.Join(e.aRoot, to), []byte("not audio"), 0o644)
+	plan, _ = e.planCounts()
+	for _, op := range plan["operations"].([]any) {
+		if o := op.(map[string]any); o["from"] == "cur-single.flac" && (o["status"] != "conflict" || o["to"] != strings.TrimSuffix(to, ".flac")+" (1).flac") {
+			t.Fatalf("blocked op: %v", o)
+		}
+	}
+	e.settles()
+	if b, _ := os.ReadFile(filepath.Join(e.aRoot, to)); string(b) != "not audio" {
+		t.Fatal("outside file replaced")
+	}
+}
+
+func TestScanSeesInPlaceRewrite(t *testing.T) {
+	e := setup(t)
+	p := filepath.Join(e.aRoot, "cur-single.flac")
+	before, _ := os.Stat(p)
+	old := e.tracks(e.alice)["cur-single.flac"]["contentHash"]
+	// Rewrite the last byte in place, then put mtime back, as dd conv=notrunc
+	// followed by touch -r would: size, mtime and inode all stay the same.
+	f, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := make([]byte, 1)
+	f.ReadAt(last, before.Size()-1)
+	f.WriteAt([]byte{last[0] ^ 0xFF}, before.Size()-1)
+	f.Close()
+	os.Chtimes(p, before.ModTime(), before.ModTime())
+	data, _ := os.ReadFile(p)
+	sum := sha256.Sum256(data)
+	want := hex.EncodeToString(sum[:])
+	if old == want {
+		t.Fatal("rewrite changed nothing")
+	}
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if got := e.tracks(e.alice)["cur-single.flac"]["contentHash"]; got == want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("contentHash %v, want %s (was %v)", got, want, old)
+		}
+	}
+}
+
+func TestOrganizerSwapsThroughTemporaryNames(t *testing.T) {
+	e := setup(t)
+	e.organize()
+	tracks := e.tracks(e.alice)
+	var p1, p2 string
+	for p := range tracks {
+		if strings.HasSuffix(p, ".flac") && (p1 == "" || p < p1) {
+			p1 = p
+		}
+	}
+	for p := range tracks {
+		if strings.HasSuffix(p, ".flac") && p != p1 && path.Dir(p) != path.Dir(p1) && (p2 == "" || p < p2) {
+			p2 = p
+		}
+	}
+	// The scanner gives swapped files new IDs (each ID is still claimed by a
+	// live path), so follow them by title.
+	t1, t2 := tracks[p1]["title"], tracks[p2]["title"]
+	// Swap the two files on disk: each now sits at the other's planned name.
+	a, b := filepath.Join(e.aRoot, p1), filepath.Join(e.aRoot, p2)
+	tmp := a + ".swap"
+	for _, mv := range [][2]string{{a, tmp}, {b, a}, {tmp, b}} {
+		if err := os.Rename(mv[0], mv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(100 * time.Millisecond) {
+		now := e.tracks(e.alice)
+		if now[p1]["title"] == t2 && now[p2]["title"] == t1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan never followed the swap")
+		}
+	}
+	if _, n := e.planCounts(); n["move"] != 2 {
+		t.Fatalf("swap plans %v", n)
+	}
+	e.settles()
+	if now := e.tracks(e.alice); now[p1]["title"] != t1 || now[p2]["title"] != t2 {
+		t.Fatalf("not swapped back: %v %v", now[p1]["title"], now[p2]["title"])
+	}
+	entries, _ := os.ReadDir(filepath.Dir(a))
+	for _, en := range entries {
+		if strings.Contains(en.Name(), "(organizing ") {
+			t.Fatalf("temporary name left behind: %s", en.Name())
+		}
+	}
 }

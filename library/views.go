@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"sort"
-	"strings"
 	"time"
 
 	"flactastic/server/meta"
@@ -44,16 +43,30 @@ func or(p *string, d string) string {
 	return *p
 }
 
-// Albums groups tracks as the Mac's LibraryStore.buildAlbums does.
+// Albums groups tracks as the Mac's LibraryStore.buildAlbums does. The
+// result is shared until tracks change; callers must not modify it.
 func (l *Library) Albums() ([]Album, error) {
+	var seq int64
+	l.db.QueryRow("SELECT value FROM state WHERE key = 'seq.' || ?", KindTracks).Scan(&seq)
+	l.albumsMu.Lock()
+	defer l.albumsMu.Unlock()
+	if l.albums != nil && l.albumsSeq == seq {
+		return l.albums, nil
+	}
 	tracks, err := l.allTracks()
 	if err != nil {
 		return nil, err
 	}
-	return groupAlbums(tracks), nil
+	albums := GroupAlbums(tracks)
+	for i := range albums {
+		albums[i].tracks = nil // don't keep every track alive
+	}
+	l.albums, l.albumsSeq = albums, seq
+	return albums, nil
 }
 
-func groupAlbums(tracks []Track) []Album {
+// GroupAlbums groups tracks into albums the way Albums does.
+func GroupAlbums(tracks []Track) []Album {
 	byName := map[string][]Track{}
 	var names []string
 	for _, t := range tracks {
@@ -159,30 +172,31 @@ func intOr(p *int, d int) int {
 	return *p
 }
 
-// Search matches case- and diacritic-insensitively on titles and credits.
+// Search matches case- and diacritic-insensitively on titles and credits,
+// inside SQLite against each track's searchText.
 func (l *Library) Search(q string, limit int) ([]Track, error) {
 	needle := meta.ArtistKey(q)
-	var out []Track
+	out := []Track{}
 	if needle == "" {
 		return out, nil
 	}
-	err := l.Tracks(func(data []byte) error {
-		if len(out) >= limit {
-			return nil
-		}
+	rows, err := l.db.Query("SELECT data FROM tracks WHERE path IS NOT NULL AND instr(search, ?) > 0 LIMIT ?", needle, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var data []byte
 		var t Track
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
 		if err := json.Unmarshal(data, &t); err != nil {
-			return err
+			return nil, err
 		}
-		for _, f := range []string{t.Title, or(t.Artist, ""), or(t.AlbumArtist, ""), or(t.Album, "")} {
-			if strings.Contains(meta.ArtistKey(f), needle) {
-				out = append(out, t)
-				break
-			}
-		}
-		return nil
-	})
-	return out, err
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // Playlists

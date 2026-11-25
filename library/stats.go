@@ -101,7 +101,7 @@ func (l *Library) Listening(loc *time.Location, since *time.Time, limit int, now
 	s.TopAlbums = rankAlbums(ev, func(a AlbumRank) bool { return a.Minutes > 0 }, limit)
 	available := map[string]bool{}
 	if tracks, err := l.allTracks(); err == nil {
-		for _, a := range groupAlbums(tracks) {
+		for _, a := range GroupAlbums(tracks) {
 			available[a.ID] = true
 		}
 	}

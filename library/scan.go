@@ -102,8 +102,8 @@ func (l *Library) watch(ctx context.Context) int {
 }
 
 type indexed struct {
-	id                 string
-	size, mtime, inode int64
+	id                        string
+	size, mtime, inode, ctime int64
 }
 
 // ScanReport is what a scan asked for from the CLI found.
@@ -133,12 +133,12 @@ func (l *Library) scan(watch int) {
 	wanted := l.report.Swap(false)
 	l.setState(StateScanning)
 	known := map[string]indexed{}
-	rows, err := l.db.Query("SELECT path, id, size, mtime, inode FROM tracks WHERE path IS NOT NULL")
+	rows, err := l.db.Query("SELECT path, id, size, mtime, inode, ctime FROM tracks WHERE path IS NOT NULL")
 	if err == nil {
 		for rows.Next() {
 			var p string
 			var t indexed
-			rows.Scan(&p, &t.id, &t.size, &t.mtime, &t.inode)
+			rows.Scan(&p, &t.id, &t.size, &t.mtime, &t.inode, &t.ctime)
 			known[p] = t
 		}
 		rows.Close()
@@ -182,7 +182,8 @@ func (l *Library) scan(watch int) {
 			return nil
 		}
 		st := info.Sys().(*syscall.Stat_t)
-		if t, ok := known[rel]; ok && t.size == info.Size() && t.mtime == info.ModTime().UnixNano() && t.inode == int64(st.Ino) {
+		if t, ok := known[rel]; ok && t.size == info.Size() && t.mtime == info.ModTime().UnixNano() && t.inode == int64(st.Ino) &&
+			t.ctime == st.Ctim.Nano() {
 			return nil
 		}
 		if time.Since(info.ModTime()) < settle {
@@ -223,7 +224,20 @@ func (l *Library) scan(watch int) {
 		l.db.QueryRow("SELECT COUNT(*) FROM tracks WHERE path IS NOT NULL").Scan(&rep.Tracks)
 		l.saveReport(rep)
 	}
-	l.prune(r, dirs, true)
+	// A folder with audio beneath it can't be pruned; only check the rest.
+	full := map[string]bool{}
+	for rel := range seen {
+		for d := path.Dir(rel); d != "." && !full[d]; d = path.Dir(d) {
+			full[d] = true
+		}
+	}
+	var empty []string
+	for _, d := range dirs {
+		if !full[d] {
+			empty = append(empty, d)
+		}
+	}
+	l.prune(r, empty, true)
 	l.saveSidecar(r)
 	l.sweep(r)
 	l.mu.Unlock()
@@ -254,6 +268,8 @@ func (l *Library) index(r *Root, rel string, hash ...string) error {
 		return err
 	}
 	defer f.Close()
+	// Before the stat: setting the ID xattr changes ctime.
+	id := l.identify(f, rel)
 	var st unix.Statx_t
 	if err := unix.Statx(int(f.Fd()), "", unix.AT_EMPTY_PATH, unix.STATX_BASIC_STATS|unix.STATX_BTIME, &st); err != nil {
 		return err
@@ -276,13 +292,13 @@ func (l *Library) index(r *Root, rel string, hash ...string) error {
 	pic := tf.Picture()
 	tf.Close()
 
-	id := l.identify(f, rel)
+	ctime := time.Unix(st.Ctime.Sec, int64(st.Ctime.Nsec)).UnixNano()
 	var oldHash *string
-	var oldSize, oldMtime, oldInode int64
+	var oldSize, oldMtime, oldInode, oldCtime int64
 	var oldAdded string
-	l.db.QueryRow("SELECT hash, size, mtime, inode, json_extract(data, '$.dateAdded') FROM tracks WHERE id = ?", id).
-		Scan(&oldHash, &oldSize, &oldMtime, &oldInode, &oldAdded)
-	if oldSize != int64(st.Size) || oldMtime != mtime.UnixNano() || oldInode != int64(st.Ino) {
+	l.db.QueryRow("SELECT hash, size, mtime, inode, ctime, json_extract(data, '$.dateAdded') FROM tracks WHERE id = ?", id).
+		Scan(&oldHash, &oldSize, &oldMtime, &oldInode, &oldCtime, &oldAdded)
+	if oldSize != int64(st.Size) || oldMtime != mtime.UnixNano() || oldInode != int64(st.Ino) || oldCtime != ctime {
 		oldHash = nil
 	}
 	if len(hash) > 0 {
@@ -302,10 +318,11 @@ func (l *Library) index(r *Root, rel string, hash ...string) error {
 				return err
 			}
 		}
-		_, err := tx.Exec(`INSERT INTO tracks(id, path, seq, size, mtime, inode, hash, art, data) VALUES(?,?,?,?,?,?,?,?,?)
+		_, err := tx.Exec(`INSERT INTO tracks(id, path, seq, size, mtime, inode, ctime, hash, art, search, data) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET path=excluded.path, seq=excluded.seq, size=excluded.size, mtime=excluded.mtime,
-			inode=excluded.inode, hash=excluded.hash, art=excluded.art, data=excluded.data`,
-			id, rel, seq, st.Size, mtime.UnixNano(), st.Ino, oldHash, t.ArtworkID, data)
+			inode=excluded.inode, ctime=excluded.ctime, hash=excluded.hash, art=excluded.art, search=excluded.search,
+			data=excluded.data`,
+			id, rel, seq, st.Size, mtime.UnixNano(), st.Ino, ctime, oldHash, t.ArtworkID, searchText(t), data)
 		return err
 	}, KindTracks)
 }
@@ -453,17 +470,17 @@ func (l *Library) wakeHasher() {
 // hashLoop fills in contentHash for every track, one file at a time.
 func (l *Library) hashLoop(ctx context.Context) {
 	type job struct {
-		id, rel            string
-		size, mtime, inode int64
+		id, rel                   string
+		size, mtime, inode, ctime int64
 	}
 	buf := make([]byte, 1<<20)
 	idle := true
 	for {
 		var jobs []job
-		if rows, err := l.db.Query("SELECT id, path, size, mtime, inode FROM tracks WHERE hash IS NULL AND path IS NOT NULL LIMIT 64"); err == nil {
+		if rows, err := l.db.Query("SELECT id, path, size, mtime, inode, ctime FROM tracks WHERE hash IS NULL AND path IS NOT NULL LIMIT 64"); err == nil {
 			for rows.Next() {
 				var j job
-				rows.Scan(&j.id, &j.rel, &j.size, &j.mtime, &j.inode)
+				rows.Scan(&j.id, &j.rel, &j.size, &j.mtime, &j.inode, &j.ctime)
 				jobs = append(jobs, j)
 			}
 			rows.Close()
@@ -484,7 +501,7 @@ func (l *Library) hashLoop(ctx context.Context) {
 		idle = false
 		failed := false
 		for _, j := range jobs {
-			sum, err := hashFile(ctx, r, j.rel, j.size, j.mtime, buf)
+			sum, err := hashFile(ctx, r, j.rel, j.size, j.mtime, j.ctime, buf)
 			if ctx.Err() != nil {
 				return
 			}
@@ -496,7 +513,7 @@ func (l *Library) hashLoop(ctx context.Context) {
 					return err
 				}
 				_, err := tx.Exec(`UPDATE tracks SET hash = ?, seq = ?, data = json_set(data, '$.contentHash', ?)
-					WHERE id = ? AND size = ? AND mtime = ? AND inode = ?`, sum, seq, sum, j.id, j.size, j.mtime, j.inode)
+					WHERE id = ? AND size = ? AND mtime = ? AND inode = ? AND ctime = ?`, sum, seq, sum, j.id, j.size, j.mtime, j.inode, j.ctime)
 				return err
 			}, KindTracks)
 			l.mu.Unlock()
@@ -514,8 +531,8 @@ func (l *Library) hashLoop(ctx context.Context) {
 }
 
 // hashFile streams a file's SHA-256 and checks it didn't change meanwhile;
-// a negative mtime skips that check.
-func hashFile(ctx context.Context, r *Root, rel string, size, mtime int64, buf []byte) (string, error) {
+// a negative mtime skips the mtime and ctime checks.
+func hashFile(ctx context.Context, r *Root, rel string, size, mtime, ctime int64, buf []byte) (string, error) {
 	f, err := r.Open(rel, unix.O_RDONLY, 0)
 	if err != nil {
 		return "", err
@@ -536,7 +553,8 @@ func hashFile(ctx context.Context, r *Root, rel string, size, mtime int64, buf [
 		}
 	}
 	info, err := f.Stat()
-	if err != nil || info.Size() != size || (mtime >= 0 && info.ModTime().UnixNano() != mtime) {
+	if err != nil || info.Size() != size || (mtime >= 0 && (info.ModTime().UnixNano() != mtime ||
+		info.Sys().(*syscall.Stat_t).Ctim.Nano() != ctime)) {
 		return "", os.ErrInvalid
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

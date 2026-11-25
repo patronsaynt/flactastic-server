@@ -141,13 +141,19 @@ func (r *Root) Remove(rel string, isDir bool) error {
 
 // Exists reports whether rel names anything, without following a final symlink.
 func (r *Root) Exists(rel string) bool {
+	_, err := r.Stat(rel)
+	return err == nil
+}
+
+// Stat is lstat beneath the root.
+func (r *Root) Stat(rel string) (unix.Stat_t, error) {
+	var st unix.Stat_t
 	fd, base, err := r.dir(rel, false)
 	if err != nil {
-		return false
+		return st, err
 	}
 	defer unix.Close(fd)
-	var st unix.Stat_t
-	return unix.Fstatat(fd, base, &st, unix.AT_SYMLINK_NOFOLLOW) == nil
+	return st, unix.Fstatat(fd, base, &st, unix.AT_SYMLINK_NOFOLLOW)
 }
 
 // Create makes a new file beneath the root, creating its parents.

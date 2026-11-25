@@ -221,3 +221,22 @@ func FuzzSanitizeRelativePath(f *testing.F) {
 		}
 	})
 }
+
+// The ASCII fast path must agree with the full Unicode path on every input.
+func TestArtistKeyASCIIFastPath(t *testing.T) {
+	var all []byte
+	for c := 0; c < 0x80; c++ {
+		all = append(all, byte(c))
+	}
+	inputs := []string{"", "  Daft   Punk ", "AC/DC", "\tA\r\nB\v\fC ", string(all), "K", "İ"[:0]}
+	for i := range all {
+		for j := range all {
+			inputs = append(inputs, string([]byte{' ', all[i], 'x', all[j], all[i]}))
+		}
+	}
+	for _, in := range inputs {
+		if got, want := ArtistKey(in), artistKey(in); got != want {
+			t.Fatalf("ArtistKey(%q) = %q, full path %q", in, got, want)
+		}
+	}
+}

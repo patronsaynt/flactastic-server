@@ -37,6 +37,7 @@ Each user has their own library folder. Folders can't overlap.
 ## CLI
 
 ```
+flactastic-server start | stop | restart     control the systemd service
 flactastic-server info                       address, fingerprint, version
 flactastic-server user add NAME --root PATH [--admin] [--quota 500G]
 flactastic-server user list
@@ -47,11 +48,18 @@ flactastic-server device list [NAME]
 flactastic-server device revoke ID
 flactastic-server session [--user NAME]      live board of active streams
 flactastic-server session log                streams that have finished
+flactastic-server library tracks NAME        a user's tracks, as the apps show them
+flactastic-server library albums NAME        albums, grouped as the apps group them
+flactastic-server library artists NAME       artists with album and track counts
+flactastic-server library playlists NAME     playlists; library playlist NAME PLAYLIST lists one
+flactastic-server library stats NAME         counts, size, length and formats
 flactastic-server scan [NAME]                rescan now
 flactastic-server rebuild [NAME]             re-read every file's tags
 flactastic-server backup DIR                 copy every database, safe while running
 flactastic-server version
 ```
+
+The `library` views take `--sort KEY` and `--reverse`, and narrow with `--artist TEXT`, `--album TEXT` (part of a name, ignoring case and accents) and `--format flac|mp3|alac|aac|wav|aiff`. `flactastic-server --help` lists each view's sort keys. They read the index, so they work while the server runs and show what it has scanned so far.
 
 Run these as root. Logs go to the journal: `journalctl -u flactastic-server`.
 

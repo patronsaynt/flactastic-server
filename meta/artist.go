@@ -11,6 +11,24 @@ import (
 // ArtistKey is ArtistResolver.key(for:): case- and diacritic-folded (full
 // case folding, then nonspacing marks dropped), whitespace collapsed, trimmed.
 func ArtistKey(raw string) string {
+	if isASCII(raw) {
+		// Folding ASCII is lowercasing; there are no marks to drop.
+		return strings.Join(strings.Fields(strings.ToLower(raw)), " ")
+	}
+	return artistKey(raw)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// artistKey is ArtistKey's full Unicode path.
+func artistKey(raw string) string {
 	f := norm.NFD.String(cases.Fold().String(raw))
 	f = NFC(strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Mn, r) {

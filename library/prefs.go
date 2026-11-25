@@ -146,7 +146,7 @@ func (l *Library) Manifest(sel *Selection, f meta.SyncFilter) (meta.LibraryManif
 		for _, id := range sel.AlbumIDs {
 			albums[id] = true
 		}
-		for _, a := range groupAlbums(tracks) {
+		for _, a := range GroupAlbums(tracks) {
 			if albums[a.ID] {
 				for _, id := range a.TrackIDs {
 					want[id] = true

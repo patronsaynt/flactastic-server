@@ -80,13 +80,13 @@ func clock(d time.Duration) string {
 }
 
 func size(n float64) string {
-	for _, u := range []string{"B", "KB", "MB"} {
+	for _, u := range []string{"B", "KB", "MB", "GB"} {
 		if n < 1000 {
 			return fmt.Sprintf("%.3g %s", n, u)
 		}
 		n /= 1000
 	}
-	return fmt.Sprintf("%.3g GB", n)
+	return fmt.Sprintf("%.3g TB", n)
 }
 
 func name(s api.Stream) string {

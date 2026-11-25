@@ -9,15 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
 	"golang.org/x/sys/unix"
+	"golang.org/x/text/cases"
 
 	"flactastic/server/meta"
 	"flactastic/server/taglib"
@@ -277,7 +281,7 @@ func (l *Library) CancelUpload(id string) error {
 
 func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	part := incomingDir + u.ID + ".part"
-	sum, err := hashFile(context.Background(), r, part, u.size, -1, make([]byte, 1<<20))
+	sum, err := hashFile(context.Background(), r, part, u.size, -1, -1, make([]byte, 1<<20))
 	if err != nil || sum != u.hash {
 		l.CancelUpload(u.ID)
 		return nil, ErrHash
@@ -474,15 +478,15 @@ func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) er
 }
 
 // moved records a rename the server made. Callers hold l.mu.
-func (l *Library) moved(id, from, to string) {
-	l.write(func(tx *sql.Tx, seq int64) error {
+func (l *Library) moved(id, from, to string) error {
+	delete(l.sidecar, from)
+	l.sidecar[to] = id
+	l.sidecarDirty = true
+	return l.write(func(tx *sql.Tx, seq int64) error {
 		_, err := tx.Exec("UPDATE tracks SET path = ?, seq = ?, data = json_set(data, '$.relativePath', ?) WHERE id = ?",
 			to, seq, to, id)
 		return err
 	}, KindTracks)
-	delete(l.sidecar, from)
-	l.sidecar[to] = id
-	l.sidecarDirty = true
 }
 
 // Organizer plans (protocol §12)
@@ -508,10 +512,105 @@ func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
 		return "", nil, err
 	}
 	planned := meta.PlanOrganize(tracks, l.profile(profileID), l.resolver())
+
+	// Collisions get their numbers here, so apply never picks a name and a
+	// settled library plans no moves.
+	key := pathKey
+	held := map[string]bool{}  // paths the plan's own tracks hold now
+	plain := map[string]bool{} // every rendered destination
+	groups := map[string][]int{}
+	var order []string
+	for i, o := range planned {
+		held[key(o.Source)] = true
+		dest := fitComponents(o.Destination)
+		k := key(dest)
+		if groups[k] == nil {
+			order = append(order, k)
+		}
+		plain[k] = true
+		groups[k] = append(groups[k], i)
+	}
+	listed := map[string]map[string]bool{}
+	outside := func(p string) bool { // taken on disk by a file the plan doesn't hold
+		if held[key(p)] {
+			return false
+		}
+		dir := path.Dir(p)
+		if listed[key(dir)] == nil {
+			listed[key(dir)] = map[string]bool{}
+			if r, err := l.Root(); err == nil {
+				entries, _ := os.ReadDir(path.Join(r.Path, dir))
+				for _, e := range entries {
+					listed[key(dir)][key(path.Base(e.Name()))] = true
+				}
+			}
+		}
+		return listed[key(dir)][key(path.Base(p))]
+	}
+	sort.Strings(order)
+	to := make([]string, len(planned))
+	numberedGroup := make([]bool, len(planned))
+	assigned := map[string]bool{}
+	for _, k := range order {
+		members := groups[k]
+		dest := fitComponents(planned[members[0]].Destination)
+		ext := path.Ext(dest)
+		stem := strings.TrimSuffix(dest, ext)
+		numbered := func(n int) string {
+			s := stem
+			for len(path.Base(s))+len(fmt.Sprintf(" (%d)", n))+len(ext) > meta.MaxComponentBytes {
+				_, size := utf8.DecodeLastRuneInString(s)
+				s = s[:len(s)-size]
+			}
+			return fmt.Sprintf("%s (%d)%s", s, n, ext)
+		}
+		// Rank: the track at the plain name, then the lowest existing number,
+		// then track ID.
+		rank := func(i int) int {
+			src := key(planned[i].Source)
+			if src == k {
+				return 0
+			}
+			pre, suf := key(stem+" ("), key(")"+ext)
+			if strings.HasPrefix(src, pre) && strings.HasSuffix(src, suf) && len(src) > len(pre)+len(suf) {
+				if n, err := strconv.Atoi(src[len(pre) : len(src)-len(suf)]); err == nil && n > 0 {
+					return n
+				}
+			}
+			return math.MaxInt
+		}
+		sort.SliceStable(members, func(a, b int) bool {
+			ra, rb := rank(members[a]), rank(members[b])
+			if ra != rb {
+				return ra < rb
+			}
+			return planned[members[a]].ID.String() < planned[members[b]].ID.String()
+		})
+		n := 0
+		for j, i := range members {
+			name := dest
+			if j > 0 || outside(dest) {
+				for n++; plain[key(numbered(n))] || assigned[key(numbered(n))] || outside(numbered(n)); n++ {
+				}
+				name = numbered(n)
+			}
+			assigned[key(name)] = true
+			to[i] = name
+			numberedGroup[i] = len(members) > 1 || name != dest
+		}
+	}
+
 	ops := make([]PlanOp, len(planned))
 	lines := make([]string, len(planned))
 	for i, o := range planned {
-		ops[i] = PlanOp{TrackID: o.ID, From: o.Source, To: fitComponents(o.Destination), Status: string(o.Status)}
+		status := meta.OpMove
+		switch {
+		case key(o.Source) == key(to[i]):
+			status = meta.OpUnchanged
+		case numberedGroup[i]:
+			status = meta.OpConflict
+		}
+		ops[i] = PlanOp{TrackID: o.ID, From: o.Source, To: to[i], Status: string(status)}
 		lines[i] = o.ID.String() + ":" + ops[i].To
 	}
 	sort.Strings(lines)
@@ -519,8 +618,20 @@ func (l *Library) OrganizePlan(profileID *meta.UUID) (string, []PlanOp, error) {
 	return hex.EncodeToString(sum[:]), ops, nil
 }
 
+// pathKey compares paths the way a case-insensitive, normalization-insensitive
+// disk does: case-folded and NFC.
+func pathKey(p string) string {
+	for i := 0; i < len(p); i++ {
+		if p[i] >= 0x80 {
+			return meta.NFC(cases.Fold().String(p))
+		}
+	}
+	return strings.ToLower(p)
+}
+
 // OrganizeApply runs a plan the user approved, if the library still plans
-// the same way.
+// the same way. Each file goes to exactly its planned path; a file that
+// another move needs out of the way goes through a temporary name first.
 func (l *Library) OrganizeApply(profileID *meta.UUID, planHash string) (moved, unchanged int, err error) {
 	r, err := l.Root()
 	if err != nil {
@@ -535,25 +646,95 @@ func (l *Library) OrganizeApply(profileID *meta.UUID, planHash string) (moved, u
 	if hash != planHash {
 		return 0, 0, ErrPlanStale
 	}
-	var emptied []string
+	key := pathKey
+	targets := map[string]bool{}
 	for _, o := range ops {
+		if o.Status != string(meta.OpUnchanged) {
+			targets[key(o.To)] = true
+		}
+	}
+	var emptied []string
+	defer func() {
+		if l.profile(profileID).DeleteEmptyOriginals {
+			l.prune(r, emptied, false)
+		}
+		l.saveSidecar(r)
+	}()
+	from := map[int]string{}
+	before := map[int]unix.Stat_t{}
+	for i, o := range ops {
 		if o.Status == string(meta.OpUnchanged) {
 			unchanged++
 			continue
 		}
-		dest := meta.UniqueName(o.To, r.Exists)
-		if _, err := meta.SanitizeAudioRelativePath(dest); err != nil || r.Rename(o.From, dest, true) != nil {
+		if _, err := meta.SanitizeAudioRelativePath(o.To); err != nil {
+			return moved, unchanged, fmt.Errorf("organize %s: %w", o.To, err)
+		}
+		from[i] = o.From
+		before[i], _ = r.Stat(o.From)
+		if targets[key(o.From)] {
+			// A visible name, so a crash here leaves the file in the library.
+			ext := path.Ext(o.From)
+			tmp := strings.TrimSuffix(o.From, ext) + " (organizing " + o.TrackID.String()[:8] + ")" + ext
+			if err := r.Rename(o.From, tmp, true); err != nil {
+				l.restore(r, ops, from)
+				return moved, unchanged, fmt.Errorf("organize %s: %w", o.From, err)
+			}
+			// The index follows, freeing the path for the track moving in.
+			from[i] = tmp
+			if err := l.moved(o.TrackID.String(), o.From, tmp); err != nil {
+				l.restore(r, ops, from)
+				return moved, unchanged, fmt.Errorf("organize %s: %w", o.From, err)
+			}
+		}
+	}
+	for i, o := range ops {
+		src, ok := from[i]
+		if !ok {
 			continue
 		}
-		l.moved(o.TrackID.String(), o.From, dest)
+		if err := r.Rename(src, o.To, true); err != nil {
+			l.restore(r, ops, from)
+			return moved, unchanged, fmt.Errorf("organize %s -> %s: %w", o.From, o.To, err)
+		}
+		delete(from, i)
+		if err := l.moved(o.TrackID.String(), src, o.To); err != nil {
+			l.restore(r, ops, from)
+			return moved, unchanged, fmt.Errorf("organize %s -> %s: index: %w", o.From, o.To, err)
+		}
+		l.renamedCtime(r, o.TrackID.String(), o.To, before[i])
 		emptied = append(emptied, path.Dir(o.From))
 		moved++
 	}
-	if l.profile(profileID).DeleteEmptyOriginals {
-		l.prune(r, emptied, false)
-	}
-	l.saveSidecar(r)
 	return moved, unchanged, nil
+}
+
+// restore puts files parked under temporary names back where they were,
+// or beside it when another move has taken that path.
+func (l *Library) restore(r *Root, ops []PlanOp, from map[int]string) {
+	for i, src := range from {
+		if src == ops[i].From {
+			continue
+		}
+		dest := ops[i].From
+		if r.Rename(src, dest, true) != nil {
+			if dest = meta.UniqueName(dest, r.Exists); r.Rename(src, dest, true) != nil {
+				continue // still at src, which the index already records
+			}
+		}
+		l.moved(ops[i].TrackID.String(), src, dest)
+	}
+}
+
+// renamedCtime records the ctime a rename gave a file, if the index was
+// current for it beforehand, so the move alone doesn't force a re-hash.
+func (l *Library) renamedCtime(r *Root, id, to string, before unix.Stat_t) {
+	after, err := r.Stat(to)
+	if err != nil || after.Ino != before.Ino || after.Size != before.Size || after.Mtim != before.Mtim {
+		return
+	}
+	l.db.Exec("UPDATE tracks SET ctime = ? WHERE id = ? AND ctime = ? AND size = ? AND mtime = ? AND inode = ?",
+		after.Ctim.Nano(), id, before.Ctim.Nano(), before.Size, before.Mtim.Nano(), before.Ino)
 }
 
 // sweep deletes staged uploads and trash past their lifetimes.

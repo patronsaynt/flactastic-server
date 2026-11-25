@@ -26,7 +26,50 @@ CREATE TABLE contexts(kind TEXT NOT NULL, target TEXT NOT NULL, date TEXT NOT NU
 CREATE TABLE docs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE uploads(id TEXT PRIMARY KEY, ext TEXT NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL, track TEXT,
 	created INTEGER NOT NULL)`, `
-CREATE TABLE userdata(name TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL)`}
+CREATE TABLE userdata(name TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL)`, `
+-- ctime catches in-place rewrites that restore mtime; -1 matches no file, so
+-- the first scan after this migration re-reads every track once.
+ALTER TABLE tracks ADD COLUMN ctime INTEGER NOT NULL DEFAULT -1`, `
+-- searchText, filled in when a library opens.
+ALTER TABLE tracks ADD COLUMN search TEXT`}
+
+// searchText is what Search matches against: the title and credits, folded
+// as ArtistKey folds them, one per line. ArtistKey turns every newline into a
+// space, so a match can't span two fields.
+func searchText(t Track) string {
+	return meta.ArtistKey(t.Title) + "\n" + meta.ArtistKey(or(t.Artist, "")) + "\n" +
+		meta.ArtistKey(or(t.AlbumArtist, "")) + "\n" + meta.ArtistKey(or(t.Album, ""))
+}
+
+// fillSearch computes searchText for rows indexed before it existed.
+func (l *Library) fillSearch() error {
+	type row struct{ id, text string }
+	var todo []row
+	rows, err := l.db.Query("SELECT id, data FROM tracks WHERE search IS NULL AND path IS NOT NULL")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		var data []byte
+		var t Track
+		if rows.Scan(&id, &data) == nil && json.Unmarshal(data, &t) == nil {
+			todo = append(todo, row{id, searchText(t)})
+		}
+	}
+	rows.Close()
+	if len(todo) == 0 {
+		return rows.Err()
+	}
+	return l.write(func(tx *sql.Tx, _ int64) error {
+		for _, r := range todo {
+			if _, err := tx.Exec("UPDATE tracks SET search = ? WHERE id = ?", r.text, r.id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
 
 // Track is a track as clients see it (protocol §7).
 type Track struct {

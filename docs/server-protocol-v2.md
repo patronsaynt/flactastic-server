@@ -641,8 +641,18 @@ POST /v2/organizer/apply  { "profileID": UUID?, "planHash": "hex" }
 200 { "moved": 812, "unchanged": 8300 }
 ```
 
-`status` is `move`, `unchanged` or `conflict` (two tracks render to one path;
-the second gets ` (1)`, ` (2)` … before the extension, as the Mac does).
+`to` is the final path, numbering included: the plan, not `apply`, picks
+every name. Paths compare case-folded and NFC-normalized, as a
+case-insensitive disk does. Tracks that render to one path are numbered in a
+fixed order: the track already at the plain name keeps it, then the track at
+the lowest existing number, then by track ID. The others get ` (1)`, ` (2)` …
+before the extension, skipping numbers held by files outside the plan. A
+plain name held by such a file is numbered too. `status` is `unchanged` when
+`from` already matches `to`; otherwise it is `conflict` for a track in a
+numbered group and `move` for everything else. A library organized once
+plans no moves the next time. `apply` moves each file to exactly `to`, going
+through a temporary name when one move frees the path another needs. It
+fails without overwriting if `to` is taken.
 `planHash` is SHA-256 over the sorted lines `<trackID>:<to>`. On `apply` the
 server recomputes the plan and answers `409 planStale` if the hash differs,
 so a library that changed while the user looked at the preview is never

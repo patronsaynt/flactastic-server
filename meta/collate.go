@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"cmp"
 	"strings"
 	"sync"
 
@@ -30,7 +31,11 @@ var collators = sync.Pool{New: func() any { return collate.New(language.Und, col
 // root-locale collation ignoring case and width, digit runs compared by
 // value, ties broken by code point. It orders presentation only; nothing the
 // server decides depends on it.
-func StandardLess(a, b string) bool {
+func StandardLess(a, b string) bool { return StandardCompare(a, b) < 0 }
+
+// StandardCompare is StandardLess as -1, 0 or 1, for sorts that would
+// otherwise compare twice.
+func StandardCompare(a, b string) int {
 	c := collators.Get().(*collate.Collator)
 	defer collators.Put(c)
 	ra, rb := digitRuns(a), digitRuns(b)
@@ -39,19 +44,19 @@ func StandardLess(a, b string) bool {
 		if isDigit(x[0]) && isDigit(y[0]) {
 			x, y = strings.TrimLeft(x, "0"), strings.TrimLeft(y, "0")
 			if len(x) != len(y) {
-				return len(x) < len(y)
+				return cmp.Compare(len(x), len(y))
 			}
 			if x != y {
-				return x < y
+				return strings.Compare(x, y)
 			}
 			continue
 		}
 		if r := c.CompareString(x, y); r != 0 {
-			return r < 0
+			return r
 		}
 	}
 	if len(ra) != len(rb) {
-		return len(ra) < len(rb)
+		return cmp.Compare(len(ra), len(rb))
 	}
-	return a < b
+	return strings.Compare(a, b)
 }

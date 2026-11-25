@@ -27,6 +27,7 @@ const usage = `FLACtastic Server
 
 Usage:
   flactastic-server serve [--listen :4410]
+  flactastic-server start | stop | restart
   flactastic-server info
   flactastic-server user add NAME --root PATH [--admin] [--quota SIZE] [--password-stdin]
   flactastic-server user list
@@ -36,6 +37,9 @@ Usage:
   flactastic-server device list [NAME]
   flactastic-server device revoke ID
   flactastic-server session [list|log] [--user NAME]
+  flactastic-server library tracks|albums|artists|playlists|stats NAME [--sort KEY] [--reverse]
+                    [--artist TEXT] [--album TEXT] [--format FORMAT]
+  flactastic-server library playlist NAME PLAYLIST [--sort KEY] [--reverse]
   flactastic-server scan [NAME]
   flactastic-server rebuild [NAME]
   flactastic-server backup DIR
@@ -44,20 +48,30 @@ Usage:
 Every command takes --data DIR (default /var/lib/flactastic-server).
 session shows active streams, live on a terminal; session log shows finished ones.
 SIZE is bytes or a number with K, M, G or T. Removing a user never touches their music.
+start, stop and restart control the flactastic-server systemd service.
+library shows a user's library as the apps do; --artist and --album match
+part of a name, ignoring case and accents. Sort keys:
+  tracks     album (default), title, artist, year, added, duration, size, format, path
+  albums     name (default), artist, year, tracks, duration, added
+  artists    name (default), albums, tracks, duration
+  playlists  name (default), tracks, created
+  playlist   position (default), or any tracks key
 `
 
 const dropIn = "/etc/systemd/system/flactastic-server.service.d/libraries.conf"
 
 type opts struct {
 	data, listen, root, quota, admin, user string
-	passwordStdin                          bool
+	sort, artist, album, format            string
+	passwordStdin, reverse                 bool
 	args                                   []string
 }
 
 // parse accepts flags anywhere, so a name can come before them.
 func parse(args []string) (opts, error) {
 	o := opts{data: "/var/lib/flactastic-server", listen: ":4410"}
-	values := map[string]*string{"--data": &o.data, "--listen": &o.listen, "--root": &o.root, "--quota": &o.quota, "--admin": &o.admin, "--user": &o.user}
+	values := map[string]*string{"--data": &o.data, "--listen": &o.listen, "--root": &o.root, "--quota": &o.quota, "--admin": &o.admin, "--user": &o.user,
+		"--sort": &o.sort, "--artist": &o.artist, "--album": &o.album, "--format": &o.format}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !strings.HasPrefix(a, "--") {
@@ -68,6 +82,8 @@ func parse(args []string) (opts, error) {
 		switch {
 		case name == "--password-stdin" && !hasValue:
 			o.passwordStdin = true
+		case name == "--reverse" && !hasValue:
+			o.reverse = true
 		case name == "--admin" && !hasValue:
 			o.admin = "true"
 		case values[name] != nil:
@@ -105,6 +121,11 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
+	case "start", "stop", "restart":
+		if len(o.args) > 1 {
+			return fmt.Errorf("unknown command %q; see --help", strings.Join(o.args, " "))
+		}
+		return service(o.args[0])
 	}
 	s, err := store.New(o.data)
 	if err != nil {
@@ -155,6 +176,8 @@ func run(args []string) error {
 			return fmt.Errorf("no device %q", arg(2))
 		}
 		return said(nil, "Signed out device %s.", arg(2))
+	case o.args[0] == "library":
+		return libraryCmd(o, s)
 	case o.args[0] == "scan", o.args[0] == "rebuild":
 		return scan(o, s, arg(1))
 	case o.args[0] == "backup" && arg(1) != "":
@@ -514,4 +537,26 @@ func settle(s *store.Store) {
 		exec.Command("systemctl", "daemon-reload").Run()
 		exec.Command("systemctl", "try-restart", "flactastic-server").Run()
 	}
+}
+
+// service starts, stops or restarts the systemd unit and says what happened.
+func service(verb string) error {
+	cmd := exec.Command("systemctl", verb, "flactastic-server")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		if _, look := exec.LookPath("systemctl"); look != nil {
+			return errors.New("systemctl not found; this command needs the systemd service the installer sets up")
+		}
+		return fmt.Errorf("systemctl %s flactastic-server failed (%v); see journalctl -u flactastic-server", verb, err)
+	}
+	if verb == "stop" {
+		fmt.Println("Stopped flactastic-server. Clients can't connect until it starts again.")
+		return nil
+	}
+	state, _ := exec.Command("systemctl", "is-active", "flactastic-server").Output()
+	if strings.TrimSpace(string(state)) != "active" {
+		return fmt.Errorf("flactastic-server is %s after %s; see journalctl -u flactastic-server", strings.TrimSpace(string(state)), verb)
+	}
+	fmt.Printf("%sed flactastic-server.\n", map[string]string{"start": "Start", "restart": "Restart"}[verb])
+	return nil
 }

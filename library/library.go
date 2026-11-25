@@ -48,6 +48,10 @@ type Library struct {
 
 	sidecar      map[string]string // relative path → trackID, the Mac's track-ids.json
 	sidecarDirty bool
+
+	albumsMu  sync.Mutex
+	albums    []Album // Albums' last result, as of tracks change albumsSeq
+	albumsSeq int64
 }
 
 // identity is <root>/.flactastic/library.json, the Mac's format.
@@ -96,6 +100,10 @@ func Open(u store.User, dataDir string) (*Library, error) {
 	l := &Library{User: u, Dir: dir, db: db, wake: make(chan struct{}, 1), hashing: make(chan struct{}, 1),
 		changed: make(chan struct{})}
 	l.state.Store(StateScanning)
+	if err := l.fillSearch(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return l, nil
 }
 
