@@ -202,3 +202,60 @@ func TestEditOnNetworkMountWhileStreaming(t *testing.T) {
 	}
 	checkInSync(t, l, r)
 }
+
+// Organize apply on a library whose index trails the disk (an SMB mount
+// rescans every 10 minutes): a file the plan moves has gone. Nothing may
+// move; the answer is planStale, and a scan brings the index up to date.
+func TestOrganizeApplyWithMissingSource(t *testing.T) {
+	l, r := testLibrary(t, "in/a.flac", "in/b.mp3")
+	copyTestFile(t, "tagged.mp3", filepath.Join(r.Path, "in/b.mp3"))
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(filepath.Join(r.Path, "in/b.mp3"), old, old)
+	l.scan(-1)
+	hash, ops, err := l.OrganizePlan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moving := 0
+	for _, o := range ops {
+		if o.Status != "unchanged" {
+			moving++
+		}
+	}
+	if moving != 2 {
+		t.Fatalf("%d moves planned, want 2", moving)
+	}
+	os.Remove(filepath.Join(r.Path, "in/b.mp3")) // gone, the index not told
+	moved, _, err := l.OrganizeApply(nil, hash)
+	if !errors.Is(err, ErrPlanStale) || moved != 0 {
+		t.Fatalf("apply: moved %d, %v; want nothing moved and ErrPlanStale", moved, err)
+	}
+	if _, err := os.Stat(filepath.Join(r.Path, "in/a.flac")); err != nil {
+		t.Fatal("a.flac moved though the apply was refused")
+	}
+	l.scan(-1)
+	l.scan(-1) // a missing file is forgotten on the second look
+	hash, _, _ = l.OrganizePlan(nil)
+	if moved, _, err := l.OrganizeApply(nil, hash); err != nil || moved != 1 {
+		t.Fatalf("after the scan: moved %d, %v", moved, err)
+	}
+	checkInSync(t, l, r)
+}
+
+// A copy of a file gets its own trackID, and the file must carry it, or
+// every later check takes the copy for the original.
+func TestCopyGetsItsOwnIDOnDisk(t *testing.T) {
+	l, r := testLibrary(t, "a.flac")
+	a := idAt(l, "a.flac")
+	src, _ := os.ReadFile(filepath.Join(r.Path, "a.flac"))
+	os.WriteFile(filepath.Join(r.Path, "b.flac"), src, 0o644)
+	unix.Setxattr(filepath.Join(r.Path, "b.flac"), xattrName, []byte(a.String()), 0) // cp --preserve=xattr
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(filepath.Join(r.Path, "b.flac"), old, old)
+	l.scan(-1)
+	b := idAt(l, "b.flac")
+	if b == a || b == (meta.UUID{}) {
+		t.Fatalf("copy: id %v, original %v", b, a)
+	}
+	checkInSync(t, l, r)
+}

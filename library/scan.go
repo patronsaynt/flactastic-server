@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -273,9 +274,9 @@ func underAny(rel string, dirs []string) bool {
 	return false
 }
 
-// index reads one file and records it, with its content hash when the
-// caller has just verified one. Callers hold l.mu.
-func (l *Library) index(r *Root, rel string, hash ...string) error {
+// index reads one file and records it, with its content and audio hashes
+// when the caller has just computed them. Callers hold l.mu.
+func (l *Library) index(r *Root, rel string, hashes ...string) error {
 	f, err := r.Open(rel, unix.O_RDONLY, 0)
 	if err != nil {
 		return err
@@ -306,22 +307,22 @@ func (l *Library) index(r *Root, rel string, hash ...string) error {
 	tf.Close()
 
 	ctime := time.Unix(st.Ctime.Sec, int64(st.Ctime.Nsec)).UnixNano()
-	var oldHash *string
+	var oldHash, oldAudio *string
 	var oldSize, oldMtime, oldInode, oldCtime int64
 	var oldAdded string
-	l.db.QueryRow("SELECT hash, size, mtime, inode, ctime, json_extract(data, '$.dateAdded') FROM tracks WHERE id = ?", id).
-		Scan(&oldHash, &oldSize, &oldMtime, &oldInode, &oldCtime, &oldAdded)
+	l.db.QueryRow("SELECT hash, audio, size, mtime, inode, ctime, json_extract(data, '$.dateAdded') FROM tracks WHERE id = ?", id).
+		Scan(&oldHash, &oldAudio, &oldSize, &oldMtime, &oldInode, &oldCtime, &oldAdded)
 	if oldSize != int64(st.Size) || oldMtime != mtime.UnixNano() || oldInode != int64(st.Ino) || oldCtime != ctime {
-		oldHash = nil
+		oldHash, oldAudio = nil, nil
 	}
-	if len(hash) > 0 {
-		oldHash = &hash[0]
+	if len(hashes) > 1 {
+		oldHash, oldAudio = &hashes[0], &hashes[1]
 	}
 	if a, err := time.Parse(time.RFC3339Nano, oldAdded); err == nil {
 		added = a
 	}
 	t := buildTrack(id, rel, int64(st.Size), tags, pic, added, mtime)
-	t.ContentHash = oldHash
+	t.ContentHash, t.AudioHash = oldHash, published(oldAudio)
 	data, _ := json.Marshal(t)
 	return l.write(func(tx *sql.Tx, seq int64) error {
 		// A different track that used to live at this path is gone.
@@ -331,11 +332,11 @@ func (l *Library) index(r *Root, rel string, hash ...string) error {
 				return err
 			}
 		}
-		_, err := tx.Exec(`INSERT INTO tracks(id, path, seq, size, mtime, inode, ctime, hash, art, search, data) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+		_, err := tx.Exec(`INSERT INTO tracks(id, path, seq, size, mtime, inode, ctime, hash, audio, art, search, data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET path=excluded.path, seq=excluded.seq, size=excluded.size, mtime=excluded.mtime,
-			inode=excluded.inode, ctime=excluded.ctime, hash=excluded.hash, art=excluded.art, search=excluded.search,
+			inode=excluded.inode, ctime=excluded.ctime, hash=excluded.hash, audio=excluded.audio, art=excluded.art, search=excluded.search,
 			data=excluded.data`,
-			id, rel, seq, st.Size, mtime.UnixNano(), st.Ino, ctime, oldHash, t.ArtworkID, searchText(t), data)
+			id, rel, seq, st.Size, mtime.UnixNano(), st.Ino, ctime, oldHash, oldAudio, t.ArtworkID, searchText(t), data)
 		return err
 	}, KindTracks)
 }
@@ -388,7 +389,7 @@ func fingerprint(t Track) string {
 }
 
 func tombstone(tx *sql.Tx, id string, seq int64) error {
-	_, err := tx.Exec("UPDATE tracks SET path = NULL, seq = ?, hash = NULL WHERE id = ?", seq, id)
+	_, err := tx.Exec("UPDATE tracks SET path = NULL, seq = ?, hash = NULL, audio = NULL WHERE id = ?", seq, id)
 	return err
 }
 
@@ -431,8 +432,9 @@ func (l *Library) identify(f *os.File, rel string) string {
 }
 
 func (l *Library) setID(f *os.File, rel, id string) {
-	n, err := unix.Fgetxattr(int(f.Fd()), xattrName, make([]byte, 64))
-	if err != nil || n != len(id) {
+	buf := make([]byte, 64)
+	n, err := unix.Fgetxattr(int(f.Fd()), xattrName, buf)
+	if err != nil || string(buf[:n]) != id { // a copy given its own ID keeps the original's until rewritten
 		unix.Fsetxattr(int(f.Fd()), xattrName, []byte(id), 0)
 	}
 	if l.sidecar[rel] != id {
@@ -480,26 +482,30 @@ func (l *Library) wakeHasher() {
 	}
 }
 
-// hashLoop fills in contentHash for every track, one file at a time.
-func (l *Library) hashLoop(ctx context.Context) {
-	type job struct {
-		id, rel                   string
-		size, mtime, inode, ctime int64
+// published is a stored audio hash as the Track shows it: "" (no audio
+// spans for this format) is null, like one not yet computed.
+func published(audio *string) *string {
+	if audio == nil || *audio == "" {
+		return nil
 	}
+	return audio
+}
+
+// hashLoop fills in contentHash and audioHash for every track, one file at
+// a time: new tracks first, then tracks hashed before audioHash existed.
+func (l *Library) hashLoop(ctx context.Context) {
 	buf := make([]byte, 1<<20)
 	idle := true
 	for {
-		var jobs []job
-		if rows, err := l.db.Query("SELECT id, path, size, mtime, inode, ctime FROM tracks WHERE hash IS NULL AND path IS NOT NULL LIMIT 64"); err == nil {
-			for rows.Next() {
-				var j job
-				rows.Scan(&j.id, &j.rel, &j.size, &j.mtime, &j.inode, &j.ctime)
-				jobs = append(jobs, j)
-			}
-			rows.Close()
-		}
 		r, err := l.Root()
-		if len(jobs) == 0 || err != nil {
+		n, failed := 0, false
+		if err == nil {
+			n, failed = l.hashBatch(ctx, r, buf)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if n == 0 {
 			if !idle {
 				idle = true
 				debug.FreeOSMemory()
@@ -512,26 +518,6 @@ func (l *Library) hashLoop(ctx context.Context) {
 			continue
 		}
 		idle = false
-		failed := false
-		for _, j := range jobs {
-			sum, err := hashFile(ctx, r, j.rel, j.size, j.mtime, j.ctime, buf)
-			if ctx.Err() != nil {
-				return
-			}
-			l.mu.Lock()
-			l.write(func(tx *sql.Tx, seq int64) error {
-				if err != nil {
-					// Unreadable or changed underneath: the next scan reindexes it.
-					_, err := tx.Exec("UPDATE tracks SET mtime = 0 WHERE id = ? AND mtime = ?", j.id, j.mtime)
-					return err
-				}
-				_, err := tx.Exec(`UPDATE tracks SET hash = ?, seq = ?, data = json_set(data, '$.contentHash', ?)
-					WHERE id = ? AND size = ? AND mtime = ? AND inode = ? AND ctime = ?`, sum, seq, sum, j.id, j.size, j.mtime, j.inode, j.ctime)
-				return err
-			}, KindTracks)
-			l.mu.Unlock()
-			failed = failed || err != nil
-		}
 		if failed {
 			l.Scan()
 			select {
@@ -543,32 +529,107 @@ func (l *Library) hashLoop(ctx context.Context) {
 	}
 }
 
-// hashFile streams a file's SHA-256 and checks it didn't change meanwhile;
-// a negative mtime skips the mtime and ctime checks.
-func hashFile(ctx context.Context, r *Root, rel string, size, mtime, ctime int64, buf []byte) (string, error) {
+// hashBatch hashes up to 64 tracks that lack a contentHash, or failing that,
+// an audioHash, and publishes each result. It reports how many it tried and
+// whether any file couldn't be read.
+func (l *Library) hashBatch(ctx context.Context, r *Root, buf []byte) (n int, failed bool) {
+	type job struct {
+		id, rel                   string
+		size, mtime, inode, ctime int64
+	}
+	var jobs []job
+	// Each names its partial index: SQLite's planner would otherwise walk the
+	// path index over every track on each wake, long after there's nothing left.
+	for _, from := range []string{"tracks INDEXED BY tracks_unhashed WHERE hash IS NULL",
+		"tracks INDEXED BY tracks_noaudio WHERE audio IS NULL"} {
+		rows, err := l.db.Query("SELECT id, path, size, mtime, inode, ctime FROM " + from + " AND path IS NOT NULL LIMIT 64")
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var j job
+			rows.Scan(&j.id, &j.rel, &j.size, &j.mtime, &j.inode, &j.ctime)
+			jobs = append(jobs, j)
+		}
+		rows.Close()
+		if len(jobs) > 0 {
+			break
+		}
+	}
+	for _, j := range jobs {
+		sum, audio, err := hashFile(ctx, r, j.rel, j.size, j.mtime, j.ctime, buf)
+		if ctx.Err() != nil {
+			return len(jobs), failed
+		}
+		l.mu.Lock()
+		l.write(func(tx *sql.Tx, seq int64) error {
+			if err != nil {
+				// Unreadable or changed underneath: the next scan reindexes it.
+				_, err := tx.Exec("UPDATE tracks SET mtime = 0 WHERE id = ? AND mtime = ?", j.id, j.mtime)
+				return err
+			}
+			_, err := tx.Exec(`UPDATE tracks SET hash = ?, audio = ?, seq = ?,
+				data = json_set(data, '$.contentHash', ?, '$.audioHash', ?)
+				WHERE id = ? AND size = ? AND mtime = ? AND inode = ? AND ctime = ?`,
+				sum, audio, seq, sum, published(&audio), j.id, j.size, j.mtime, j.inode, j.ctime)
+			return err
+		}, KindTracks)
+		l.mu.Unlock()
+		failed = failed || err != nil
+	}
+	return len(jobs), failed
+}
+
+// hashFile streams a file once for its SHA-256 and, from the same bytes,
+// the SHA-256 of its audio alone (see audioSpans; "" when the format isn't
+// one it knows), and checks the file didn't change meanwhile. A negative
+// mtime skips the mtime and ctime checks.
+func hashFile(ctx context.Context, r *Root, rel string, size, mtime, ctime int64, buf []byte) (content, audio string, err error) {
 	f, err := r.Open(rel, unix.O_RDONLY, 0)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	for {
+	spans, hasAudio := audioSpans(f, size, strings.TrimPrefix(path.Ext(rel), "."))
+	// Hash both while the next chunk is read: buf's two halves take turns,
+	// so this is no slower than reading the file and hashing it once.
+	h, a := sha256.New(), sha256.New()
+	halves := [2][]byte{buf[:len(buf)/2], buf[len(buf)/2:]}
+	var wg sync.WaitGroup
+	defer wg.Wait() // never return while a hash still reads buf
+	for off, cur := int64(0), 0; ; cur ^= 1 {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", "", ctx.Err()
 		}
-		n, err := f.Read(buf)
-		h.Write(buf[:n])
+		n, err := f.Read(halves[cur])
+		wg.Wait()
+		chunk := halves[cur][:n]
+		wg.Add(2)
+		go func() { defer wg.Done(); h.Write(chunk) }()
+		go func(off int64) {
+			defer wg.Done()
+			for _, s := range spans {
+				if lo, hi := max(s.start, off), min(s.end, off+int64(n)); lo < hi {
+					a.Write(chunk[lo-off : hi-off])
+				}
+			}
+		}(off)
+		off += int64(n)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
+	wg.Wait()
 	info, err := f.Stat()
 	if err != nil || info.Size() != size || (mtime >= 0 && (info.ModTime().UnixNano() != mtime ||
 		info.Sys().(*syscall.Stat_t).Ctim.Nano() != ctime)) {
-		return "", os.ErrInvalid
+		return "", "", os.ErrInvalid
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	if hasAudio {
+		audio = hex.EncodeToString(a.Sum(nil))
+	}
+	return hex.EncodeToString(h.Sum(nil)), audio, nil
 }

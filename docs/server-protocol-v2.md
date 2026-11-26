@@ -272,6 +272,7 @@ guess faster than sign-in.
   "format": "flac",                 // flac | mp3 | wav | aiff | alac | aac
   "fileSize": 31234567,
   "contentHash": "hex sha-256",     // null until hashed
+  "audioHash": "hex sha-256",       // the audio alone (§8.5); null until hashed, or for an unknown layout
   "tagFingerprint": "hex sha-256",  // §8.2
   "title": "One More Time",         // never empty: falls back to the file name
   "artist": "Daft Punk",            // stored credit string (§8.3)
@@ -344,7 +345,8 @@ The server ignores symlinks and hidden names (a leading `.`) in a library,
 as the Mac's scanner does, and never follows a symlink when it opens a file.
 
 Two-tier matching, as v1: **`trackID`** first, then **`contentHash`**
-(lowercase hex SHA-256 of the whole file). After a client downloads or
+(lowercase hex SHA-256 of the whole file). `audioHash` (§8.5) finds the
+same recording under different tags. After a client downloads or
 uploads a file, it adopts the server's `trackID` for it.
 
 ### 8.2 `tagFingerprint`
@@ -392,6 +394,36 @@ split by album artist when any track in the group has one. The album `id` is
 `"<albumArtist or display artist>|<album name>"`, where the display artist is
 the album artist, else the single lead credit shared by every track, else
 `Various Artists`. This is the same `id` the Mac uses in `PlayEvent.albumID`.
+
+
+### 8.5 `audioHash`
+
+`contentHash` changes whenever tags or artwork do. `audioHash` is the SHA-256
+(lowercase hex) of the audio data alone, so the same recording with
+different tags matches. Clients that compare FLAC STREAMINFO MD5s should use
+it instead: many store-bought FLACs leave that MD5 all zeros.
+
+| Format | Bytes hashed |
+|---|---|
+| FLAC | everything after the last metadata block (a leading ID3v2 tag skipped) |
+| MP3 (and raw AAC) | the file without a leading ID3v2 tag (and its footer), a trailing ID3v1 tag (`TAG`, 128 bytes) and an APEv2 tag |
+| MP4 (M4A, ALAC, AAC) | the payload of every top-level `mdat` atom, in file order |
+| WAV | the payload of the `data` chunk |
+| AIFF | the payload of the `SSND` chunk |
+
+The format comes from the file's own header, not its extension. Anything
+else, or a file whose structure doesn't parse, has `audioHash: null` once
+hashed. Retagging, including adding or changing embedded artwork, never
+changes `audioHash`; re-encoding or editing the audio does. It covers the
+stored audio bytes, so the same recording encoded twice (or as FLAC and
+MP3) does not match.
+
+The server computes both hashes in the same read of the file and publishes
+them together: the track's `seq` advances and it appears in the next
+`/v2/tracks` page. Libraries indexed before `audioHash` existed fill it in
+in the background, in batches, after any unhashed tracks; their
+`contentHash` stays as it was meanwhile. `pendingHashes` (§7) counts
+`contentHash` only.
 
 ---
 
@@ -669,7 +701,11 @@ fails without overwriting if `to` is taken.
 `planHash` is SHA-256 over the sorted lines `<trackID>:<to>`. On `apply` the
 server recomputes the plan and answers `409 planStale` if the hash differs,
 so a library that changed while the user looked at the preview is never
-reorganised against an approval they didn't give. With
+reorganised against an approval they didn't give. It also answers `409
+planStale`, moving nothing, when a file the plan moves is no longer where the
+index says (changed on disk since the last scan, which on a network mount
+can be 10 minutes ago); the server rescans, so planning again after a few
+seconds succeeds. With
 `deleteEmptyOriginals`, folders left with no audio (cover art and other
 leftovers included) are removed after organizing, refiling and deleting, never
 above the library root. A scan removes folders that are completely empty,

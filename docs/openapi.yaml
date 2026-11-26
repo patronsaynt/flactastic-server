@@ -1194,7 +1194,7 @@ components:
     Track:
       type: object
       description: Optional values are omitted when absent.
-      required: [id, relativePath, format, fileSize, contentHash, tagFingerprint, title, artistIsList, albumArtistIsList,
+      required: [id, relativePath, format, fileSize, contentHash, audioHash, tagFingerprint, title, artistIsList, albumArtistIsList,
         secondaryGenres, isCompilation, isMixCompilation, duration, sampleRate, channels, bitrate, frames, hasCueSheet,
         dateAdded, modified]
       properties:
@@ -1203,6 +1203,12 @@ components:
         format: { $ref: '#/components/schemas/Format' }
         fileSize: { type: integer }
         contentHash: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$', description: 'null until hashed.' }
+        audioHash:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{64}$'
+          description: >-
+            SHA-256 of the audio data alone (protocol §8.5); unchanged by retagging. null until hashed, or
+            for a file whose layout the server doesn't know.
         tagFingerprint: { $ref: '#/components/schemas/Hex256' }
         title: { type: string, description: 'Never empty; falls back to the file name.' }
         artist: { type: string, description: 'Stored credit string (§8.3).' }

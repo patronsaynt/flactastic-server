@@ -31,7 +31,11 @@ CREATE TABLE userdata(name TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NO
 -- the first scan after this migration re-reads every track once.
 ALTER TABLE tracks ADD COLUMN ctime INTEGER NOT NULL DEFAULT -1`, `
 -- searchText, filled in when a library opens.
-ALTER TABLE tracks ADD COLUMN search TEXT`}
+ALTER TABLE tracks ADD COLUMN search TEXT`, `
+-- The SHA-256 of the audio alone (audioSpans): NULL until computed, '' for a
+-- format it doesn't know. The hasher fills it in, existing tracks included.
+ALTER TABLE tracks ADD COLUMN audio TEXT;
+CREATE INDEX tracks_noaudio ON tracks(id) WHERE audio IS NULL AND path IS NOT NULL`}
 
 // searchText is what Search matches against: the title and credits, folded
 // as ArtistKey folds them, one per line. ArtistKey turns every newline into a
@@ -78,6 +82,7 @@ type Track struct {
 	Format            meta.Format `json:"format"`
 	FileSize          int64       `json:"fileSize"`
 	ContentHash       *string     `json:"contentHash"`
+	AudioHash         *string     `json:"audioHash"` // null until hashed, or for a format with no audioSpans
 	TagFingerprint    string      `json:"tagFingerprint"`
 	Title             string      `json:"title"`
 	Artist            *string     `json:"artist,omitempty"`

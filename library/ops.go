@@ -295,7 +295,7 @@ func (l *Library) CancelUpload(id string) error {
 
 func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	part := incomingDir + u.ID + ".part"
-	sum, err := hashFile(context.Background(), r, part, u.size, -1, -1, make([]byte, 1<<20))
+	sum, audio, err := hashFile(context.Background(), r, part, u.size, -1, -1, make([]byte, 1<<20))
 	if err != nil || sum != u.hash {
 		l.CancelUpload(u.ID)
 		return nil, ErrHash
@@ -343,7 +343,7 @@ func (l *Library) finishUpload(r *Root, u Upload) (*Track, error) {
 	}
 	l.db.Exec("DELETE FROM uploads WHERE id = ?", u.ID)
 	uploadLocks.Delete(u.ID)
-	if err := l.index(r, dest, u.hash); err != nil {
+	if err := l.index(r, dest, u.hash, audio); err != nil {
 		return nil, err
 	}
 	l.saveSidecar(r)
@@ -442,6 +442,7 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 		l.index(r, t.RelativePath)
 		nt, _ := l.Track(t.ID)
 		if dest, err := l.place(r, nt, nt.RelativePath); err == nil && dest != nt.RelativePath {
+			before, _ := r.Stat(nt.RelativePath)
 			if err := r.Rename(nt.RelativePath, dest, true); err != nil {
 				slog.Warn("edit: track left in place", "user", l.User.Name, "from", nt.RelativePath, "to", dest, "err", err)
 			} else if err := l.moved(t.ID.String(), nt.RelativePath, dest); err != nil {
@@ -451,6 +452,7 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 				l.sidecar[nt.RelativePath] = t.ID.String()
 				delete(l.sidecar, dest)
 			} else {
+				l.renamedCtime(r, t.ID.String(), dest, before)
 				left = append(left, path.Dir(nt.RelativePath))
 				nt, _ = l.Track(t.ID)
 			}
@@ -718,6 +720,18 @@ func (l *Library) OrganizeApply(profileID *meta.UUID, planHash string) (moved, u
 	}
 	if hash != planHash {
 		return 0, 0, ErrPlanStale
+	}
+	// The plan comes from the index, which can trail the disk (an SMB mount
+	// is rescanned every 10 minutes). Check every file it moves is where the
+	// index says before moving any, so a stale plan moves nothing.
+	for _, o := range ops {
+		if o.Status == string(meta.OpUnchanged) {
+			continue
+		}
+		if err := l.checkFile(r, Track{ID: o.TrackID, RelativePath: o.From}); err != nil {
+			l.Scan()
+			return 0, 0, fmt.Errorf("%w: %v", ErrPlanStale, err)
+		}
 	}
 	key := pathKey
 	targets := map[string]bool{}

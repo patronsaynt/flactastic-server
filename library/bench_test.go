@@ -1,9 +1,13 @@
 package library
 
 import (
+	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -76,6 +80,31 @@ func BenchmarkTrackFeed100k(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+		}
+	}
+}
+
+// BenchmarkHashFile40M measures the hasher's single pass over a 40 MB FLAC,
+// computing contentHash and audioHash together.
+func BenchmarkHashFile40M(b *testing.B) {
+	dir := b.TempDir()
+	flac, err := os.ReadFile("../testdata/audio/cur-single.flac")
+	if err != nil {
+		b.Fatal(err)
+	}
+	noise := make([]byte, 40<<20)
+	rand.Read(noise)
+	os.WriteFile(filepath.Join(dir, "big.flac"), append(flac, noise...), 0o644)
+	r, err := openRoot(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	size := int64(len(flac) + len(noise))
+	buf := make([]byte, 1<<20)
+	b.SetBytes(size)
+	for b.Loop() {
+		if _, audio, err := hashFile(context.Background(), r, "big.flac", size, -1, -1, buf); err != nil || audio == "" {
+			b.Fatal(err)
 		}
 	}
 }
