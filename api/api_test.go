@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,14 +17,18 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"flactastic/server/library"
 	"flactastic/server/meta"
 	"flactastic/server/store"
+	"flactastic/server/taglib"
 )
 
 type env struct {
@@ -998,8 +1004,9 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// An edit that fails inside the server is a 500 naming its step in the log,
-// not "not found"; a track whose file is gone is still not found.
+// An edit that fails is answered with what a client can act on and logged
+// naming its step, never "not found"; a track whose file is gone is still
+// not found. A batch writes what it can and lists the rest.
 func TestEditFailuresAreReportedAndLogged(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the read-only folder")
@@ -1013,18 +1020,116 @@ func TestEditFailuresAreReportedAndLogged(t *testing.T) {
 	dir := filepath.Join(e.aRoot, "ro")
 	os.Chmod(dir, 0o555)
 	defer os.Chmod(dir, 0o755)
-	res := e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"lyrics": "la"}, 500)
-	if errCode(res) != "internalFailure" {
+	res := e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"lyrics": "la"}, 403)
+	if errCode(res) != "readOnly" {
 		t.Fatalf("read-only folder: %v", res)
 	}
 	if l := logs.String(); !strings.Contains(l, "create temporary copy") || !strings.Contains(l, "permission denied") {
 		t.Fatalf("log doesn't name the step and errno:\n%s", l)
 	}
+
+	// A batch where one folder is read-only: the other track is written.
+	ok := e.addCopy("tagged.mp3", "rw/y.mp3")
+	res = e.json(e.alice, "PATCH", "/v2/tracks", map[string]any{"ids": []string{id, ok}, "edit": map[string]any{"genre": "Dub"}}, 200)
+	written, _ := res["tracks"].([]any)
+	failed, _ := res["failed"].([]any)
+	if len(written) != 1 || written[0].(map[string]any)["id"] != ok || written[0].(map[string]any)["genre"] != "Dub" {
+		t.Fatalf("written: %v", res["tracks"])
+	}
+	if len(failed) != 1 || failed[0].(map[string]any)["id"] != id || failed[0].(map[string]any)["code"] != "readOnly" {
+		t.Fatalf("failed: %v", res["failed"])
+	}
+	// Nothing written at all is the first failure's error.
+	res = e.json(e.alice, "PATCH", "/v2/tracks", map[string]any{"ids": []string{id}, "edit": map[string]any{"genre": "Dub"}}, 403)
+	if errCode(res) != "readOnly" {
+		t.Fatalf("all failed: %v", res)
+	}
+	if res := e.json(e.alice, "PATCH", "/v2/tracks", map[string]any{"ids": []string{ok}, "edit": map[string]any{"genre": "Dub"}}, 200); res["failed"] != nil {
+		t.Fatalf("failed listed on a full success: %v", res)
+	}
 	os.Chmod(dir, 0o755)
+
+	// A file TagLib can't parse.
+	junk := e.addCopy("cur-single.flac", "junk/z.flac")
+	os.WriteFile(filepath.Join(e.aRoot, "junk/z.flac"), make([]byte, 4096), 0o644)
+	if res := e.json(e.alice, "PATCH", "/v2/tracks/"+junk, map[string]any{"lyrics": "la"}, 422); errCode(res) != "tagWriteFailed" {
+		t.Fatalf("unparseable file: %v", res)
+	}
+
+	// A file that now holds another track: the index is behind the disk.
+	unix.Setxattr(filepath.Join(e.aRoot, "junk/z.flac"), "user.com.flactastic.trackID", []byte(ok), 0)
+	if res := e.json(e.alice, "PATCH", "/v2/tracks/"+junk, map[string]any{"lyrics": "la"}, 409); errCode(res) != "indexStale" {
+		t.Fatalf("index behind: %v", res)
+	}
 
 	os.Remove(filepath.Join(dir, "x.flac"))
 	e.json(e.alice, "PATCH", "/v2/tracks/"+id, map[string]any{"lyrics": "la"}, 404)
 	if l := logs.String(); !strings.Contains(l, "status=404") || !strings.Contains(l, "no such file") {
 		t.Fatalf("404 not logged with its cause:\n%s", l)
+	}
+}
+
+// A cover over the 6000 px tag-edit limit that arrived inside a file still
+// gets thumbnails; the original is served as stored.
+func TestLargeCoverThumbnails(t *testing.T) {
+	e := setup(t)
+	img := image.NewYCbCr(image.Rect(0, 0, 6500, 6500), image.YCbCrSubsampleRatio420)
+	for i := range img.Y {
+		img.Y[i] = uint8(i / 6500 % 256)
+	}
+	for i := range img.Cb {
+		img.Cb[i], img.Cr[i] = 90, 160
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	pic := buf.Bytes()
+
+	rel := "big/cover.flac"
+	path := filepath.Join(e.aRoot, rel)
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	copyFile(t, "../testdata/audio/cur-single.flac", path)
+	fd, _ := unix.Open(path, unix.O_RDWR, 0)
+	tf, err := taglib.Open(fd, "flac", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf.Apply(taglib.Edit{Artwork: taglib.Opt[[]byte]{Set: true, V: &pic}}, tf.Read(), true, "")
+	if err := tf.Save(); err != nil {
+		t.Fatal(err)
+	}
+	tf.Close()
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(path, old, old)
+	e.server.Libs.Get(e.server.libID("alice")).Scan()
+	var art string
+	for deadline := time.Now().Add(time.Minute); art == ""; time.Sleep(100 * time.Millisecond) {
+		if tr, ok := e.tracks(e.alice)[rel]; ok && tr["artworkID"] != nil {
+			art = tr["artworkID"].(string)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never indexed with artwork")
+		}
+	}
+
+	get := func(size string) ([]byte, *http.Response) {
+		res := e.do(e.alice, "GET", "/v2/art/"+art+"?size="+size, nil, nil)
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return b, res
+	}
+	for _, size := range []int{1000, 300} {
+		b, res := get(strconv.Itoa(size))
+		if res.StatusCode != 200 || res.Header.Get("Content-Type") != "image/jpeg" {
+			t.Fatalf("size %d: %d %s", size, res.StatusCode, res.Header.Get("Content-Type"))
+		}
+		cfg, format, err := image.DecodeConfig(bytes.NewReader(b))
+		if err != nil || format != "jpeg" || cfg.Width != size || cfg.Height != size {
+			t.Fatalf("size %d: %s %dx%d %v", size, format, cfg.Width, cfg.Height, err)
+		}
+	}
+	if b, res := get("original"); res.StatusCode != 200 || !bytes.Equal(b, pic) {
+		t.Fatalf("original: %d, %d bytes, want the %d stored", res.StatusCode, len(b), len(pic))
 	}
 }

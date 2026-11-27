@@ -47,6 +47,9 @@ var (
 	ErrHash        = errors.New("hash mismatch")
 	ErrInvalid     = errors.New("invalid request")
 	ErrPlanStale   = errors.New("plan stale")
+	ErrIndexStale  = errors.New("index stale")
+	ErrReadOnly    = errors.New("read-only")
+	ErrTagWrite    = errors.New("tag write failed")
 	uploadLocks    sync.Map
 )
 
@@ -416,28 +419,46 @@ func (l *Library) Delete(id meta.UUID) error {
 // the original, and refiles the track through the selected profile. Every
 // track is checked before any is written, so a request that names a missing
 // track changes nothing.
-func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Track, error) {
+// EditFailure is a track a batch edit didn't write.
+type EditFailure struct {
+	ID  meta.UUID
+	Err error
+}
+
+// Edit writes e to every track in ids. Each is checked before any is
+// written. A track that then fails to write doesn't stop the others: it is
+// listed in failed, and only when none was written does Edit return an error
+// (the first failure's).
+func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) (out []Track, failed []EditFailure, err error) {
 	r, err := l.Root()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	tracks := make([]Track, len(ids))
 	for i, id := range ids {
 		if tracks[i], err = l.Track(id); err != nil {
-			return nil, ErrNotFound
+			return nil, nil, ErrNotFound
 		}
 		if err := l.checkFile(r, tracks[i]); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	out := make([]Track, 0, len(ids))
+	out = make([]Track, 0, len(ids))
 	var left []string
 	defer func() { l.tidy(r, left...) }()
 	for i, t := range tracks {
 		if err := l.editFile(r, t, e, separator); err != nil {
-			return out, fmt.Errorf("edited %d of %d tracks: %w", i, len(tracks), err)
+			slog.Warn("edit: track not written", "user", l.User.Name, "path", t.RelativePath, "err", err)
+			failed = append(failed, EditFailure{t.ID, err})
+			if errors.Is(err, ErrNoSpace) { // the rest would fail the same way
+				for _, rest := range tracks[i+1:] {
+					failed = append(failed, EditFailure{rest.ID, err})
+				}
+				break
+			}
+			continue
 		}
 		l.index(r, t.RelativePath)
 		nt, _ := l.Track(t.ID)
@@ -460,7 +481,10 @@ func (l *Library) Edit(ids []meta.UUID, e taglib.Edit, separator string) ([]Trac
 		out = append(out, nt)
 	}
 	l.saveSidecar(r)
-	return out, nil
+	if len(out) == 0 && len(failed) > 0 {
+		return nil, nil, failed[0].Err
+	}
+	return out, failed, nil
 }
 
 // checkFile makes sure t's own file is at its indexed path. Missing is
@@ -473,14 +497,14 @@ func (l *Library) checkFile(r *Root, t Track) error {
 		return fmt.Errorf("%w: %s: %v", ErrNotFound, t.RelativePath, err)
 	}
 	if err != nil {
-		return fmt.Errorf("open %s: %v", t.RelativePath, err)
+		return editErr(t, "open", err)
 	}
 	defer f.Close()
 	buf := make([]byte, 64)
 	if n, err := unix.Fgetxattr(int(f.Fd()), xattrName, buf); err == nil {
 		if other := string(buf[:n]); !strings.EqualFold(other, t.ID.String()) {
 			l.Scan()
-			return fmt.Errorf("%s holds track %s, not %s: the index is behind the disk; rescanning", t.RelativePath, other, t.ID)
+			return fmt.Errorf("%w: %s holds track %s, not %s: the index is behind the disk; rescanning", ErrIndexStale, t.RelativePath, other, t.ID)
 		}
 	}
 	return nil
@@ -491,7 +515,7 @@ func (l *Library) checkFile(r *Root, t Track) error {
 // can rename within atomically. Errors name the failing step and never pass
 // on ENOENT, which would read as a missing track.
 func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) (err error) {
-	step := func(s string, err error) error { return fmt.Errorf("edit %s: %s: %v", t.RelativePath, s, err) }
+	step := func(s string, err error) error { return editErr(t, s, err) }
 	src, err := r.Open(t.RelativePath, unix.O_RDONLY, 0)
 	if err != nil {
 		return step("open", err)
@@ -547,6 +571,24 @@ func (l *Library) editFile(r *Root, t Track, e taglib.Edit, separator string) (e
 	}
 	ok = true
 	return nil
+}
+
+// editErr names the step of t's edit that failed. The cause is kept as
+// text, so ENOENT never reads as a missing track; what a client can act on
+// is wrapped as ErrTagWrite, ErrReadOnly or ErrNoSpace.
+func editErr(t Track, step string, err error) error {
+	var kind error
+	switch {
+	case errors.Is(err, taglib.ErrOpen), errors.Is(err, taglib.ErrSave):
+		kind = ErrTagWrite
+	case errors.Is(err, unix.ENOSPC), errors.Is(err, unix.EDQUOT):
+		kind = ErrNoSpace
+	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM), errors.Is(err, unix.EROFS):
+		kind = ErrReadOnly
+	default:
+		return fmt.Errorf("edit %s: %s: %v", t.RelativePath, step, err)
+	}
+	return fmt.Errorf("%w: edit %s: %s: %v", kind, t.RelativePath, step, err)
 }
 
 // moved records a rename the server made. Callers hold l.mu.

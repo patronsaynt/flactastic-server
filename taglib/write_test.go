@@ -61,3 +61,37 @@ func TestWriteRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A descriptor handed over mid-file, as editFile's is after copying into it,
+// is still read from the start: TagLib's RIFF parser starts where the
+// stream stands, and from EOF it found no chunks and saved past the end.
+func TestOpenRewinds(t *testing.T) {
+	art := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, make([]byte, 300<<10)...)
+	for _, name := range []string{"wave.wav", "aiff.aiff", "hires.flac", "tagged.mp3", "aac.m4a"} {
+		path := filepath.Join(t.TempDir(), name)
+		data, _ := os.ReadFile(filepath.Join("../testdata/audio", name))
+		os.WriteFile(path, data, 0o644)
+		ext := filepath.Ext(name)[1:]
+		fd, _ := unix.Open(path, unix.O_RDWR, 0)
+		unix.Seek(fd, 0, 2)
+		f, err := Open(fd, ext, true)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		cur := f.Read()
+		f.Apply(Edit{Artwork: opt(art), Title: opt("T")}, cur, ext == "flac", "")
+		if err := f.Save(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		f.Close()
+		fd, _ = unix.Open(path, unix.O_RDONLY, 0)
+		f, _ = Open(fd, ext, false)
+		if got := f.Picture(); len(got) != len(art) {
+			t.Errorf("%s: cover is %d bytes, want %d", name, len(got), len(art))
+		}
+		if got := f.Read().Title; got != "T" {
+			t.Errorf("%s: title %q", name, got)
+		}
+		f.Close()
+	}
+}

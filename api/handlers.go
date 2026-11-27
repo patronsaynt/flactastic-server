@@ -245,14 +245,22 @@ func (srv *Server) edit(w http.ResponseWriter, r *http.Request, s session) error
 	}
 	var prefs library.Prefs
 	s.lib.Doc("prefs", &prefs)
-	tracks, err := s.lib.Edit(ids, e, prefs.Separator())
+	tracks, failed, err := s.lib.Edit(ids, e, prefs.Separator())
 	if err != nil {
 		return err
 	}
 	if r.PathValue("id") != "" {
 		return ok(w, map[string]any{"track": tracks[0]})
 	}
-	return ok(w, map[string]any{"tracks": tracks})
+	out := map[string]any{"tracks": tracks}
+	if len(failed) > 0 {
+		list := make([]map[string]any, len(failed))
+		for i, f := range failed {
+			list[i] = map[string]any{"id": f.ID, "code": classify(f.Err).code}
+		}
+		out["failed"] = list
+	}
+	return ok(w, out)
 }
 
 func (srv *Server) deleteTrack(w http.ResponseWriter, r *http.Request, s session) error {

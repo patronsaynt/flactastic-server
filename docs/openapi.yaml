@@ -210,7 +210,7 @@ paths:
                 edit: { $ref: '#/components/schemas/Edit' }
       responses:
         '200':
-          description: The edited tracks, after refiling.
+          description: The tracks written, after refiling, and any that couldn't be (§10).
           content:
             application/json:
               schema:
@@ -218,12 +218,25 @@ paths:
                 required: [tracks]
                 properties:
                   tracks: { type: array, items: { $ref: '#/components/schemas/Track' } }
+                  failed:
+                    type: array
+                    description: Absent when every track was written. These tracks are unchanged on disk.
+                    items:
+                      type: object
+                      required: [id, code]
+                      properties:
+                        id: { $ref: '#/components/schemas/UUID' }
+                        code: { type: string, enum: [readOnly, tagWriteFailed, insufficientStorage, internalFailure] }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/EditFailed' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/EditFailed' }
         '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/EditFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/LibraryOffline' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
         default: { $ref: '#/components/responses/InternalFailure' }
 
   /v2/tracks/{id}:
@@ -265,10 +278,14 @@ paths:
                   track: { $ref: '#/components/schemas/Track' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/EditFailed' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/EditFailed' }
         '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/EditFailed' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/LibraryOffline' }
+        '507': { $ref: '#/components/responses/InsufficientStorage' }
         default: { $ref: '#/components/responses/InternalFailure' }
     delete:
       tags: [library]
@@ -367,7 +384,10 @@ paths:
           schema: { type: string, pattern: '^[0-9a-f]{32}$' }
         - name: size
           in: query
-          description: Long-edge pixel limit (never upscaled), or the picture as stored.
+          description: >-
+            Long-edge pixel limit (never upscaled), or the picture as stored. Thumbnails
+            are made for pictures up to 12000 px a side and an estimated 768 MiB decode;
+            for a larger one only `original` is served (§9.3).
           schema: { type: string, enum: ['300', '1000', original], default: original }
       responses:
         '200':
@@ -1084,6 +1104,9 @@ components:
     InsufficientStorage:
       description: '`insufficientStorage` (quota, or less than 500 MB would stay free).'
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    EditFailed:
+      description: 'A tag edit that wrote nothing (§10): `readOnly` (403), `indexStale` (409), `tagWriteFailed` (422).'
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     InternalFailure:
       description: '`internalFailure`.'
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
@@ -1124,9 +1147,9 @@ components:
           properties:
             code:
               type: string
-              enum: [badRequest, unsupportedFormat, unauthorized, invalidCredentials, forbidden,
-                notFound, duplicate, offsetMismatch, planStale, sizeExceeded, hashMismatch, rateLimited, libraryOffline,
-                transcodeUnavailable, insufficientStorage, internalFailure]
+              enum: [badRequest, unsupportedFormat, unauthorized, invalidCredentials, forbidden, readOnly,
+                notFound, duplicate, offsetMismatch, planStale, indexStale, sizeExceeded, hashMismatch, tagWriteFailed,
+                rateLimited, libraryOffline, transcodeUnavailable, insufficientStorage, internalFailure]
             message: { type: string, description: 'For logs only; clients key on `code`.' }
             track:
               allOf: [{ $ref: '#/components/schemas/Track' }]

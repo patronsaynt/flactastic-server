@@ -129,11 +129,14 @@ var (
 	errAuth        = newErr(401, "unauthorized")
 	errCredentials = newErr(401, "invalidCredentials")
 	errForbidden   = newErr(403, "forbidden")
+	errReadOnly    = newErr(403, "readOnly")
 	errNotFound    = newErr(404, "notFound")
 	errOffset      = newErr(409, "offsetMismatch")
 	errPlanStale   = newErr(409, "planStale")
+	errIndexStale  = newErr(409, "indexStale")
 	errTooLarge    = newErr(413, "sizeExceeded")
 	errHash        = newErr(422, "hashMismatch")
+	errTagWrite    = newErr(422, "tagWriteFailed")
 	errRateLimited = newErr(429, "rateLimited")
 	errOffline     = newErr(503, "libraryOffline")
 	errTranscode   = newErr(503, "transcodeUnavailable")
@@ -144,6 +147,20 @@ var (
 // fail answers err as its API error and logs it with its cause, which the
 // answer's code alone doesn't carry.
 func fail(w http.ResponseWriter, r *http.Request, err error) {
+	e := classify(err)
+	level := slog.LevelWarn
+	if e.status >= 500 {
+		level = slog.LevelError
+	}
+	slog.Log(r.Context(), level, "request failed", "method", r.Method, "path", r.URL.Path,
+		"status", e.status, "code", e.code, "err", err)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(e.status)
+	json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": e.code, "message": e.code}})
+}
+
+// classify is the API error err answers as; 500 for anything unforeseen.
+func classify(err error) *apiError {
 	var e *apiError
 	var tooBig *http.MaxBytesError
 	switch {
@@ -169,18 +186,16 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 		e = errHash
 	case errors.Is(err, library.ErrPlanStale):
 		e = errPlanStale
+	case errors.Is(err, library.ErrIndexStale):
+		e = errIndexStale
+	case errors.Is(err, library.ErrReadOnly):
+		e = errReadOnly
+	case errors.Is(err, library.ErrTagWrite):
+		e = errTagWrite
 	default:
 		e = errInternal
 	}
-	level := slog.LevelWarn
-	if e.status >= 500 {
-		level = slog.LevelError
-	}
-	slog.Log(r.Context(), level, "request failed", "method", r.Method, "path", r.URL.Path,
-		"status", e.status, "code", e.code, "err", err)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(e.status)
-	json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": e.code, "message": e.code}})
+	return e
 }
 
 func reply(w http.ResponseWriter, status int, v any) error {

@@ -168,12 +168,15 @@ which part was wrong.
 | 401 | `unauthorized` | Missing, unknown or revoked token |
 | 401 | `invalidCredentials` | Sign-in failed |
 | 403 | `forbidden` | Admin-only endpoint |
+| 403 | `readOnly` | The server may not write the file or its folder (§10) |
 | 404 | `notFound` | No such object **for this user** |
 | 409 | `duplicate` | The library already has these bytes; `error.track` is the existing Track (§9.4) |
 | 409 | `offsetMismatch` | Upload offset is not where the server is |
 | 409 | `planStale` | The library changed since the plan was shown |
+| 409 | `indexStale` | A track's file now holds another track; the server is rescanning (§10) |
 | 413 | `sizeExceeded` | Body or declared file over its limit |
 | 422 | `hashMismatch` | Uploaded bytes do not match `contentHash` |
+| 422 | `tagWriteFailed` | TagLib couldn't read or save the file's tags (§10) |
 | 429 | `rateLimited` | Too many attempts; see `Retry-After` |
 | 503 | `libraryOffline` | The user's music folder is unavailable (§9.5) |
 | 503 | `transcodeUnavailable` | No transcoder, or all transcode slots busy; retry or stream the original |
@@ -509,6 +512,15 @@ once and cached; `original` is the embedded picture as stored (`image/jpeg`
 or `image/png`). Responses are immutable: `Cache-Control: private,
 max-age=31536000, immutable`, `ETag: "<artworkID>-<size>"`.
 
+A tag edit embeds pictures of at most 6000 px a side (§10), but a file
+uploaded or dropped into the library may carry a larger one. Thumbnails are
+made for pictures up to 12000 px a side whose decode the server estimates at
+768 MiB or less: any baseline JPEG or 8-bit PNG, and a progressive JPEG or
+16-bit PNG up to about 10000 px square. Thumbnails are made one at a time.
+For a larger picture, `300` and `1000` answer `404 notFound` and only
+`original` is served, so a client that gets a 404 for a thumbnail of an
+artwork ID can fall back to `original`.
+
 ### 9.4 Uploads
 
 Adds a file to the library, or replaces one. Resumable, with v1's staging
@@ -599,7 +611,7 @@ Edit = {
   "genre": String, "secondaryGenres": [String],
   "isCompilation": Bool, "isMixCompilation": Bool,
   "label": String, "lyrics": String, "cueSheet": String,
-  "artwork": base64 JPEG or PNG (≤ 10 MiB) | null to remove
+  "artwork": base64 JPEG or PNG (≤ 10 MiB, ≤ 6000 px a side) | null to remove
 }
 ```
 
@@ -618,12 +630,36 @@ its `relativePath`; the refile never takes a path held by another file or
 track. The response is `200 { "track": Track }` (or
 `{ "tracks": [Track] }`).
 
-Every track is checked before any is written. `404 notFound` means a track
-ID is unknown or a track's own file is missing (the server rescans), and
-nothing was written. Any other failure is `500 internalFailure`, with the
-failing step in the server's log; when the file at a track's path belongs to
-another track, the index is behind the disk and the server rescans, so a
-retry after the scan succeeds.
+Every track is checked before any is written, and a failed check writes
+nothing:
+
+| HTTP | `code` | Meaning |
+|------|--------|---------|
+| 404 | `notFound` | A track ID is unknown, or a track's own file is missing (the server rescans) |
+| 409 | `indexStale` | The file at a track's path holds another track: the index is behind the disk. The server rescans; drop the staged edit and retry once the track feed has caught up |
+
+Then each track is written in turn. A track that fails doesn't stop the
+others:
+
+| HTTP | `code` | Meaning |
+|------|--------|---------|
+| 403 | `readOnly` | The filesystem refused the copy or the replace (`EACCES`, `EPERM`, `EROFS`) |
+| 422 | `tagWriteFailed` | TagLib couldn't open the file or save its tags |
+| 507 | `insufficientStorage` | No room for the copy (`ENOSPC`, `EDQUOT`); the batch's remaining tracks are not tried |
+| 500 | `internalFailure` | Anything else |
+
+The failing step and its cause are in the server's log either way. When no
+track was written, the response is the first failure's error. When some
+were, a batch edit answers `200` with the tracks it wrote and the rest
+listed with their codes:
+
+```
+{ "tracks": [Track], "failed": [{ "id": UUID, "code": String }] }
+```
+
+`failed` is absent when every track was written. The tracks in `failed`
+were not changed on disk; a client keeps or drops their staged edits by
+`code`.
 
 ```
 DELETE /v2/tracks/{id}         → 204
@@ -961,6 +997,7 @@ backups) is done with the `flactastic-server` CLI on the server.
 | Single file | 2 GiB |
 | Free space kept on upload | 500 MB |
 | Embedded artwork accepted in an edit | 10 MiB, ≤ 6000 px per side |
+| Artwork thumbnailed (§9.3) | ≤ 12000 px per side, ≤ 768 MiB estimated decode |
 | Playlist | 10 000 entries, artwork 5 MiB |
 | `clients` preference value | 64 KiB each |
 | History batch | 1000 events and 1000 contexts |

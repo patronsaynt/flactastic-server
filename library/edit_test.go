@@ -84,7 +84,7 @@ func checkInSync(t *testing.T, l *Library, r *Root) {
 func TestEditRefileOntoStaleIndexedPath(t *testing.T) {
 	l, r := testLibrary(t, "a.flac", "b.flac")
 	a, b := idAt(l, "a.flac"), idAt(l, "b.flac")
-	if _, err := l.Edit([]meta.UUID{b}, genre("x"), ""); err != nil {
+	if _, _, err := l.Edit([]meta.UUID{b}, genre("x"), ""); err != nil {
 		t.Fatal(err)
 	}
 	tb, _ := l.Track(b)
@@ -97,7 +97,7 @@ func TestEditRefileOntoStaleIndexedPath(t *testing.T) {
 	}
 	old := time.Now().Add(-time.Hour)
 	os.Chtimes(moved, old, old)
-	if _, err := l.Edit([]meta.UUID{a}, genre("y"), ""); err != nil {
+	if _, _, err := l.Edit([]meta.UUID{a}, genre("y"), ""); err != nil {
 		t.Fatal(err)
 	}
 	ta, _ := l.Track(a)
@@ -142,13 +142,13 @@ func TestEditChecksEveryTrackFirst(t *testing.T) {
 	a, b := idAt(l, "x/a.flac"), idAt(l, "y/b.flac")
 	before, _ := os.ReadFile(filepath.Join(r.Path, "x/a.flac"))
 	os.Remove(filepath.Join(r.Path, "y/b.flac"))
-	if _, err := l.Edit([]meta.UUID{a, b}, genre("z"), ""); !errors.Is(err, ErrNotFound) {
+	if _, _, err := l.Edit([]meta.UUID{a, b}, genre("z"), ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing file: %v, want ErrNotFound", err)
 	}
 	if after, err := os.ReadFile(filepath.Join(r.Path, "x/a.flac")); err != nil || !bytes.Equal(before, after) {
 		t.Fatal("the first track was written though the batch failed")
 	}
-	if _, err := l.Edit([]meta.UUID{meta.NewUUID()}, genre("z"), ""); !errors.Is(err, ErrNotFound) {
+	if _, _, err := l.Edit([]meta.UUID{meta.NewUUID()}, genre("z"), ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown ID: %v, want ErrNotFound", err)
 	}
 
@@ -156,7 +156,7 @@ func TestEditChecksEveryTrackFirst(t *testing.T) {
 	os.Rename(filepath.Join(r.Path, "x/a.flac"), filepath.Join(r.Path, "y/b.flac"))
 	os.WriteFile(filepath.Join(r.Path, "x/a.flac"), before, 0o644)
 	unix.Setxattr(filepath.Join(r.Path, "x/a.flac"), xattrName, []byte(b.String()), 0)
-	if _, err := l.Edit([]meta.UUID{a}, genre("z"), ""); err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNotFound) {
+	if _, _, err := l.Edit([]meta.UUID{a}, genre("z"), ""); !errors.Is(err, ErrIndexStale) || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNotFound) {
 		t.Fatalf("another track's file: %v, want a failure that isn't not-found", err)
 	}
 
@@ -166,8 +166,8 @@ func TestEditChecksEveryTrackFirst(t *testing.T) {
 	l2, r2 := testLibrary(t, "ro/a.flac")
 	os.Chmod(filepath.Join(r2.Path, "ro"), 0o555)
 	defer os.Chmod(filepath.Join(r2.Path, "ro"), 0o755)
-	_, err := l2.Edit([]meta.UUID{idAt(l2, "ro/a.flac")}, genre("z"), "")
-	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "create temporary copy") {
+	_, _, err := l2.Edit([]meta.UUID{idAt(l2, "ro/a.flac")}, genre("z"), "")
+	if !errors.Is(err, ErrReadOnly) || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "create temporary copy") {
 		t.Fatalf("unwritable folder: %v, want the failing step, not not-found", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestEditOnNetworkMountWhileStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
-	out, err := l.Edit([]meta.UUID{a}, genre("Bass"), "")
+	out, _, err := l.Edit([]meta.UUID{a}, genre("Bass"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,4 +258,51 @@ func TestCopyGetsItsOwnIDOnDisk(t *testing.T) {
 		t.Fatalf("copy: id %v, original %v", b, a)
 	}
 	checkInSync(t, l, r)
+}
+
+func TestEditErrKinds(t *testing.T) {
+	tr := Track{RelativePath: "a.flac"}
+	for _, c := range []struct {
+		err  error
+		want error
+	}{
+		{&os.PathError{Op: "write", Path: "x", Err: unix.ENOSPC}, ErrNoSpace},
+		{&os.PathError{Op: "write", Path: "x", Err: unix.EDQUOT}, ErrNoSpace},
+		{&os.PathError{Op: "create", Path: "x", Err: unix.EROFS}, ErrReadOnly},
+		{&os.PathError{Op: "rename", Path: "x", Err: unix.EPERM}, ErrReadOnly},
+		{taglib.ErrSave, ErrTagWrite},
+		{taglib.ErrOpen, ErrTagWrite},
+	} {
+		if err := editErr(tr, "step", c.err); !errors.Is(err, c.want) {
+			t.Errorf("%v: %v, want %v", c.err, err, c.want)
+		}
+	}
+	if err := editErr(tr, "replace original", &os.PathError{Op: "rename", Path: "x", Err: unix.ENOENT}); errors.Is(err, os.ErrNotExist) {
+		t.Error("ENOENT passed on")
+	}
+}
+
+// A batch where one track can't be written writes the others and names
+// the one that failed; when none is written, the batch fails.
+func TestEditBatchPartial(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only folder")
+	}
+	l, r := testLibrary(t, "ro/a.flac", "rw/b.flac")
+	a, b := idAt(l, "ro/a.flac"), idAt(l, "rw/b.flac")
+	os.Chmod(filepath.Join(r.Path, "ro"), 0o555)
+	defer os.Chmod(filepath.Join(r.Path, "ro"), 0o755)
+	out, failed, err := l.Edit([]meta.UUID{a, b}, genre("Dub"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].ID != b || out[0].Genre == nil || *out[0].Genre != "Dub" {
+		t.Fatalf("written: %+v", out)
+	}
+	if len(failed) != 1 || failed[0].ID != a || !errors.Is(failed[0].Err, ErrReadOnly) {
+		t.Fatalf("failed: %+v", failed)
+	}
+	if _, _, err := l.Edit([]meta.UUID{a}, genre("Dub"), ""); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("nothing written: %v", err)
+	}
 }

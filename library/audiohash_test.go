@@ -192,7 +192,7 @@ func TestAudioHashPublishedAndBackfilled(t *testing.T) {
 		t.Fatal("backfill didn't publish a new seq")
 	}
 
-	if _, err := l.Edit([]meta.UUID{a}, genre("Changed"), ""); err != nil {
+	if _, _, err := l.Edit([]meta.UUID{a}, genre("Changed"), ""); err != nil {
 		t.Fatal(err)
 	}
 	drain()

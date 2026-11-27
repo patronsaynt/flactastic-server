@@ -14,16 +14,22 @@ import "C"
 
 import (
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"flactastic/server/meta"
 )
 
 func init() { C.taglib_set_string_management_enabled(0) }
 
-var ErrOpen = errors.New("taglib: unreadable file")
+var (
+	ErrOpen = errors.New("taglib: unreadable file")
+	ErrSave = errors.New("taglib: save failed")
+)
 
 type File struct {
 	h *C.fts_handle
@@ -31,8 +37,13 @@ type File struct {
 }
 
 // Open takes ownership of fd. ext picks the parser, as TagLib's FileRef
-// does from a path.
+// does from a path. fd is read from its start whatever its offset: TagLib's
+// RIFF parser (WAV, AIFF) starts at the stream's current position.
 func Open(fd int, ext string, write bool) (*File, error) {
+	if _, err := unix.Seek(fd, 0, io.SeekStart); err != nil {
+		unix.Close(fd)
+		return nil, ErrOpen
+	}
 	types := map[string]C.int{"flac": C.FTS_FLAC, "mp3": C.FTS_MPEG, "aac": C.FTS_MPEG, "m4a": C.FTS_MP4,
 		"wav": C.FTS_WAV, "wave": C.FTS_WAV, "aif": C.FTS_AIFF, "aiff": C.FTS_AIFF}
 	t, ok := types[strings.ToLower(ext)]
@@ -41,9 +52,11 @@ func Open(fd int, ext string, write bool) (*File, error) {
 		readOnly = 0
 	}
 	var h *C.fts_handle
-	if ok {
-		h = C.fts_open(C.int(fd), t, readOnly)
+	if !ok {
+		unix.Close(fd)
+		return nil, ErrOpen
 	}
+	h = C.fts_open(C.int(fd), t, readOnly)
 	if h == nil {
 		return nil, ErrOpen
 	}
@@ -59,7 +72,7 @@ func (f *File) Close() { C.fts_close(f.h) }
 
 func (f *File) Save() error {
 	if C.taglib_file_save(f.f) == 0 {
-		return errors.New("taglib: save failed")
+		return ErrSave
 	}
 	return nil
 }
